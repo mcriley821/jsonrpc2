@@ -1,0 +1,17 @@
+version: "2"
+linters:
+  default: all
+  disable:
+    - depguard
+    - wsl # deprecated
+    - err113 # prefer wrapped errors
+    - ireturn
+    - varnamelen
+    - noinlineerr
+    - paralleltest
+
+issues:
+  uniq-by-line: false
+
+severity:
+  default: error
