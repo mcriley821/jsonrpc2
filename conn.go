@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 // Conn is a full-duplex JSON-RPC 2.0 connection. It dispatches incoming
@@ -78,8 +80,6 @@ type conn struct {
 
 	// mu protects access to inflight.
 	mu sync.RWMutex
-
-	opts connOptions
 }
 
 var _ Conn = (*conn)(nil)
@@ -107,7 +107,6 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 		wg:             sync.WaitGroup{},
 		inflight:       make(map[string]chan *response),
 		mu:             sync.RWMutex{},
-		opts:           o,
 	}
 
 	go c.run(ctx)
@@ -122,7 +121,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 	default:
 	}
 
-	id := c.opts.idGenerator()
+	id := uuid.NewString()
 
 	req, err := newRequest(id, method, params)
 	if err != nil {
@@ -147,7 +146,6 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 	case <-c.done:
 		return nil, c.termErr
 	case c.outgoing <- req:
-		c.logDebug(ctx, "call sent", "method", method, "id", id)
 	}
 
 	select {
@@ -178,7 +176,6 @@ func (c *conn) Notify(ctx context.Context, method string, params any) error {
 	case <-c.done:
 		return c.termErr
 	case c.outgoing <- req:
-		c.logDebug(ctx, "notification sent", "method", method)
 		return nil
 	}
 }
@@ -207,18 +204,11 @@ func (c *conn) Err() error {
 	}
 }
 
-func (c *conn) logDebug(ctx context.Context, msg string, args ...any) {
-	if c.opts.logger != nil {
-		c.opts.logger.DebugContext(ctx, msg, args...)
-	}
-}
-
 // shutdown records err as the terminal error (first call wins), cancels the
 // context, closes the underlying stream, and clears the inflight map. It is
 // safe to call concurrently and from multiple goroutines.
 func (c *conn) shutdown(err error) {
 	c.shutdownOnce.Do(func() {
-		c.logDebug(context.Background(), "connection shutdown", "err", err)
 		c.termErr = err
 		c.cancel()
 		c.streamCloseErr = c.stream.Close()
@@ -361,8 +351,6 @@ func (c *conn) write(ctx context.Context, errChan chan<- error) {
 func (c *conn) handleRequest(ctx context.Context, req *request) {
 	defer c.wg.Done()
 
-	c.logDebug(ctx, "request received", "method", req.Method(), "id", req.ID())
-
 	if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID()), c); err != nil {
 		c.shutdown(fmt.Errorf("handler error: %w", err))
 	}
@@ -385,8 +373,6 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 	c.mu.RUnlock()
 
 	if ok {
-		c.logDebug(ctx, "response received", "id", id)
-
 		select {
 		case <-ctx.Done():
 			return
@@ -421,7 +407,6 @@ func (c *conn) replier(id any) Replier {
 		case <-c.done:
 			return ErrClosed
 		case c.outgoing <- resp:
-			c.logDebug(ctx, "reply sent", "id", id)
 			return nil
 		}
 	}
