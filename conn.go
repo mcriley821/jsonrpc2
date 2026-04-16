@@ -87,8 +87,13 @@ var _ Conn = (*conn)(nil)
 // NewConn creates a new Conn over stream, using handler to dispatch incoming
 // requests. It starts background goroutines for reading, writing, and lifecycle
 // management; use Done and Err to observe when they exit.
-func NewConn(ctx context.Context, stream Stream, handler Handler) Conn {
+func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
 	ctx, cancel := context.WithCancel(ctx)
+
+	o := defaultConnOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
 
 	c := &conn{
 		cancel:         cancel,
