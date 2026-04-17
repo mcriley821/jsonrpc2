@@ -8,7 +8,7 @@ import (
 // requestObj is the JSON-serializable form of a JSON-RPC 2.0 request object.
 type requestObj struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id"`
+	ID      any             `json:"id,omitzero"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitzero"`
 }
