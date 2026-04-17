@@ -78,7 +78,12 @@ type conn struct {
 	// channels.
 	inflight map[string]chan *response
 
-	// mu protects access to inflight.
+	// closed is set to true by shutdown under mu, and checked atomically with
+	// inflight insertions in Call to eliminate the TOCTOU window between the
+	// done-channel check and the map write.
+	closed bool
+
+	// mu protects access to inflight and closed.
 	mu sync.RWMutex
 }
 
@@ -130,7 +135,16 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 
 	respCh := make(chan *response, 1)
 
+	// Atomically check the closed flag and insert into the inflight map.
+	// This eliminates the TOCTOU window between the done-channel fast-path
+	// check above and the map write: shutdown sets closed=true under mu
+	// before clearing the map, so the check and insert are either both
+	// before or both after shutdown runs.
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, c.termErr
+	}
 	c.inflight[id] = respCh
 	c.mu.Unlock()
 
@@ -214,11 +228,10 @@ func (c *conn) shutdown(err error) {
 		c.streamCloseErr = c.stream.Close()
 
 		c.mu.Lock()
-
+		c.closed = true
 		for id := range c.inflight {
 			delete(c.inflight, id)
 		}
-
 		c.mu.Unlock()
 	})
 }
