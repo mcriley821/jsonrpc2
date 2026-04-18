@@ -7,9 +7,8 @@
 //
 // The [Mux] type provides per-method dispatch for both request handlers and notification handlers.
 //
-// # Limitations
-//
-// Batch requests (JSON arrays of request objects) are not supported.
-// A batch received by [Conn] is answered with a single [InvalidRequest] error response
-// (ID null) and the connection remains open.
+// Batch requests (JSON arrays of request objects) are supported. Each element in the batch
+// is dispatched to the handler concurrently, and all responses are collected and sent as a
+// single JSON array. Notifications within a batch are processed but not included in the
+// response array. An empty batch array is rejected with [InvalidRequest].
 package jsonrpc2

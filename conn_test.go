@@ -433,32 +433,132 @@ func TestConn_Call_UnblockedOnClose(t *testing.T) {
 	}
 }
 
-func TestConn_BatchRequest_InvalidRequest(t *testing.T) {
+// echoHandler echoes request params back as the result.
+func echoHandler() jsonrpc2.Handler {
+	return jsonrpc2.HandlerFunc(func(ctx context.Context, req jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+		return reply(ctx, json.RawMessage(req.Params()))
+	})
+}
+
+func TestConn_Batch_Empty(t *testing.T) {
 	t.Parallel()
 
 	conn, p := getTestConn(t, assertNotCalledHandler(t))
 	defer conn.Close(t.Context())
 
-	// Send a batch request from the peer.
-	batch := []byte(`[{"jsonrpc":"2.0","id":1,"method":"foo"}]`)
-	_, err := p.Write(batch)
+	_, err := p.Write([]byte(`[]`))
 	require.NoError(t, err)
 
 	var resp struct {
-		JSONRPC string `json:"jsonrpc"`
-		ID      any    `json:"id"`
-		Error   struct {
-			Code int `json:"code"`
-		} `json:"error"`
+		Error struct{ Code int `json:"code"` } `json:"error"`
 	}
 
 	require.NoError(t, json.NewDecoder(p).Decode(&resp))
-	assert.Equal(t, "2.0", resp.JSONRPC)
-	assert.Nil(t, resp.ID)
 	assert.Equal(t, jsonrpc2.InvalidRequest, resp.Error.Code)
+}
 
-	// Connection must still be usable after the batch error.
-	require.NoError(t, conn.Err())
+func TestConn_Batch_Requests(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, echoHandler())
+	defer conn.Close(t.Context())
+
+	batch := `[` +
+		`{"jsonrpc":"2.0","id":"a","method":"echo","params":1},` +
+		`{"jsonrpc":"2.0","id":"b","method":"echo","params":2}` +
+		`]`
+	_, err := p.Write([]byte(batch))
+	require.NoError(t, err)
+
+	var responses []struct {
+		ID     string          `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+
+	require.NoError(t, json.NewDecoder(p).Decode(&responses))
+	require.Len(t, responses, 2)
+
+	got := make(map[string]json.RawMessage, 2)
+	for _, r := range responses {
+		got[r.ID] = r.Result
+	}
+
+	assert.JSONEq(t, "1", string(got["a"]))
+	assert.JSONEq(t, "2", string(got["b"]))
+}
+
+func TestConn_Batch_NotificationsOnly(t *testing.T) {
+	t.Parallel()
+
+	notifCh := make(chan struct{}, 2)
+
+	handler := jsonrpc2.HandlerFunc(func(ctx context.Context, req jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+		notifCh <- struct{}{}
+		return reply(ctx, nil)
+	})
+
+	conn, p := getTestConn(t, handler)
+	defer conn.Close(t.Context())
+
+	batch := `[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","method":"ping"}]`
+	_, err := p.Write([]byte(batch))
+	require.NoError(t, err)
+
+	// Both notifications must be handled.
+	for range 2 {
+		select {
+		case <-t.Context().Done():
+			require.FailNow(t, "notification not handled in time")
+		case <-notifCh:
+		}
+	}
+
+	// No response should be written; send a plain request to confirm the
+	// connection is alive and that next read returns that response, not a batch.
+	req := `{"jsonrpc":"2.0","id":"z","method":"ping","params":null}`
+	_, err = p.Write([]byte(req))
+	require.NoError(t, err)
+
+	var resp struct {
+		ID string `json:"id"`
+	}
+
+	require.NoError(t, json.NewDecoder(p).Decode(&resp))
+	assert.Equal(t, "z", resp.ID)
+}
+
+func TestConn_Batch_InvalidElement(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, echoHandler())
+	defer conn.Close(t.Context())
+
+	// One valid request and one invalid element (missing jsonrpc field).
+	batch := `[{"jsonrpc":"2.0","id":"ok","method":"echo","params":42},{"bad":true}]`
+	_, err := p.Write([]byte(batch))
+	require.NoError(t, err)
+
+	var responses []struct {
+		ID    any             `json:"id"`
+		Error *struct{ Code int `json:"code"` } `json:"error"`
+		Result json.RawMessage `json:"result"`
+	}
+
+	require.NoError(t, json.NewDecoder(p).Decode(&responses))
+	require.Len(t, responses, 2)
+
+	byID := make(map[any]int)
+	for i, r := range responses {
+		byID[r.ID] = i
+	}
+
+	okIdx := byID["ok"]
+	assert.JSONEq(t, "42", string(responses[okIdx].Result))
+	assert.Nil(t, responses[okIdx].Error)
+
+	errIdx := byID[nil]
+	require.NotNil(t, responses[errIdx].Error)
+	assert.Equal(t, jsonrpc2.InvalidRequest, responses[errIdx].Error.Code)
 }
 
 func TestConn_Replier_DoubleReply(t *testing.T) {

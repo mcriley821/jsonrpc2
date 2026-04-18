@@ -65,8 +65,8 @@ var _ Conn = (*conn)(nil)
 // incoming requests. The connection runs until the peer closes, the handler returns
 // an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
 //
-// Batch requests (JSON-RPC 2.0 arrays) are not supported: the connection replies
-// with an [InvalidRequest] error (ID null) and continues processing.
+// Batch requests (JSON-RPC 2.0 arrays) are supported: each element is dispatched
+// to handler concurrently and responses are sent as a single JSON array.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -271,16 +271,17 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 				return
 			}
 
-			// Batch requests are not supported; respond with InvalidRequest and continue.
 			if len(raw) > 0 && raw[0] == '[' {
-				err := NewError(InvalidRequest, "batch requests are not supported", nil)
+				var batch []json.RawMessage
+				if err := json.Unmarshal(raw, &batch); err != nil {
+					errChan <- fmt.Errorf("batch unmarshal: %w", err)
 
-				select {
-				case <-ctx.Done():
-					errChan <- ctx.Err()
 					return
-				case c.outgoing <- newErrorResponse(nil, err):
 				}
+
+				c.wg.Add(1)
+
+				go c.handleBatch(ctx, batch)
 
 				continue
 			}
@@ -354,6 +355,106 @@ func (c *conn) handleRequest(ctx context.Context, req *request) {
 
 	if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID()), c); err != nil {
 		c.shutdown(fmt.Errorf("handler error: %w", err))
+	}
+}
+
+// handleBatch processes a JSON-RPC 2.0 batch. Each element is dispatched
+// concurrently; responses are collected and sent as a single JSON array.
+// An empty batch is rejected with InvalidRequest. Notifications are processed
+// but excluded from the response array; if the batch contains only notifications
+// no response is sent, per the spec.
+func (c *conn) handleBatch(ctx context.Context, batch []json.RawMessage) {
+	defer c.wg.Done()
+
+	if len(batch) == 0 {
+		err := NewError(InvalidRequest, "empty batch", nil)
+
+		select {
+		case <-ctx.Done():
+		case c.outgoing <- newErrorResponse(nil, err):
+		}
+
+		return
+	}
+
+	var (
+		mu        sync.Mutex
+		responses []*response
+	)
+
+	var wg sync.WaitGroup
+
+	for _, elem := range batch {
+		var partial partialMessage
+		if err := json.Unmarshal(elem, &partial); err != nil || partial.JSONRPC != "2.0" || partial.Method == "" {
+			mu.Lock()
+			responses = append(responses, newErrorResponse(nil, NewError(InvalidRequest, "invalid request object", nil)))
+			mu.Unlock()
+
+			continue
+		}
+
+		req := new(request)
+		if err := json.Unmarshal(elem, req); err != nil {
+			mu.Lock()
+			responses = append(responses, newErrorResponse(nil, NewError(InvalidRequest, "invalid request object", nil)))
+			mu.Unlock()
+
+			continue
+		}
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			if err := c.handler.ServeRPC(ctx, req, c.batchReplier(req.ID(), &mu, &responses), c); err != nil {
+				c.shutdown(fmt.Errorf("handler error: %w", err))
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if len(responses) == 0 {
+		return
+	}
+
+	select {
+	case <-ctx.Done():
+	case c.outgoing <- responses:
+	}
+}
+
+// batchReplier returns a Replier that appends its response to responses instead
+// of writing directly to the stream. For notifications (id == nil) it is a no-op.
+func (c *conn) batchReplier(id any, mu *sync.Mutex, responses *[]*response) Replier {
+	if id == nil {
+		return func(context.Context, any) error { return nil }
+	}
+
+	var replied atomic.Bool
+
+	return func(ctx context.Context, result any) error {
+		if replied.Swap(true) {
+			return ErrReplied
+		}
+
+		var resp *response
+
+		if jerr, ok := result.(Error); ok {
+			resp = newErrorResponse(id, jerr)
+		} else if data, err := json.Marshal(&result); err != nil {
+			return fmt.Errorf("marshalling result: %w", err)
+		} else {
+			resp = newResponse(id, data)
+		}
+
+		mu.Lock()
+		*responses = append(*responses, resp)
+		mu.Unlock()
+
+		return nil
 	}
 }
 
