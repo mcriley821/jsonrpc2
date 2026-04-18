@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 )
@@ -368,12 +369,19 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 
 // replier returns a [Replier] bound to the request ID.
 // Notifications (id == nil) return a no-op.
+// The returned Replier returns [ErrReplied] on any call after the first.
 func (c *conn) replier(id any) Replier {
 	if id == nil {
 		return func(context.Context, any) error { return nil }
 	}
 
+	var replied atomic.Bool
+
 	return func(ctx context.Context, result any) error {
+		if replied.Swap(true) {
+			return ErrReplied
+		}
+
 		var resp *response
 
 		if jerr, ok := result.(Error); ok {
