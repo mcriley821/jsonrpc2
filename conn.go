@@ -382,9 +382,15 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 		return
 	}
 
-	c.mu.RLock()
+	// Delete under the write lock so only one goroutine can claim the channel.
+	// A duplicate response arriving concurrently will find the entry already
+	// gone and return without sending. Call's deferred delete becomes a no-op.
+	c.mu.Lock()
 	ch, ok := c.inflight[id]
-	c.mu.RUnlock()
+	if ok {
+		delete(c.inflight, id)
+	}
+	c.mu.Unlock()
 
 	if ok {
 		select {
