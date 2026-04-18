@@ -78,9 +78,9 @@ type conn struct {
 	// channels.
 	inflight map[string]chan *response
 
-	// closed is set to true by shutdown under mu, and checked atomically with
-	// inflight insertions in Call to eliminate the TOCTOU window between the
-	// done-channel check and the map write.
+	// closed is set to true by shutdown under mu. registerRequest checks it
+	// under the same lock before inserting into inflight, eliminating the
+	// TOCTOU window between the closed check and the map write.
 	closed bool
 
 	// mu protects access to inflight and closed.
@@ -120,12 +120,6 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 }
 
 func (c *conn) Call(ctx context.Context, method string, params any) (Response, error) {
-	select {
-	case <-c.done:
-		return nil, c.termErr
-	default:
-	}
-
 	id := uuid.NewString()
 
 	req, err := newRequest(id, method, params)
@@ -135,7 +129,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 
 	respCh := make(chan *response, 1)
 
-	if err := c.createRequest(id, respCh); err != nil {
+	if err := c.registerRequest(id, respCh); err != nil {
 		return nil, err
 	}
 
@@ -209,10 +203,10 @@ func (c *conn) Err() error {
 	}
 }
 
-// createRequest registers ch under id in the inflight map. It holds mu for
+// registerRequest registers ch under id in the inflight map. It holds mu for
 // the duration so that the closed check and the map insertion are a single
 // critical section, eliminating the TOCTOU window against shutdown.
-func (c *conn) createRequest(id string, ch chan *response) error {
+func (c *conn) registerRequest(id string, ch chan *response) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
