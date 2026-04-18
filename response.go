@@ -5,7 +5,6 @@ import (
 	"fmt"
 )
 
-// responseObj is the JSON-serializable form of a JSON-RPC 2.0 response object.
 type responseObj struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id"`
@@ -13,24 +12,22 @@ type responseObj struct {
 	Error   *rpcError       `json:"error,omitzero"`
 }
 
-// Response represents a JSON-RPC 2.0 response received from a Call.
+// Response represents a response received from a [Conn.Call].
 type Response interface {
 	// ID returns the request identifier this response corresponds to.
 	ID() any
 
-	// Result unmarshals the success result into value.
-	// It should only be called when Failed returns false.
+	// Result unmarshals the success result into value. Only call when
+	// [Response.Failed] returns false.
 	Result(value any) error
 
-	// Error returns the RPC error if the response is an error response,
-	// or nil otherwise.
+	// Error returns the error, or nil if this is a success response.
 	Error() Error
 
-	// Failed reports whether the response carries an error.
+	// Failed reports whether this is an error response.
 	Failed() bool
 }
 
-// response is an implementation of Response.
 type response struct {
 	obj responseObj
 }
@@ -74,7 +71,6 @@ func (r *response) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// newErrorResponse constructs an error response for the given request id.
 func newErrorResponse(id any, err Error) *response {
 	jerr, ok := err.(*rpcError)
 
@@ -94,7 +90,6 @@ func newErrorResponse(id any, err Error) *response {
 	}}
 }
 
-// newResponse constructs a success response for the given request id.
 func newResponse(id any, result json.RawMessage) *response {
 	return &response{responseObj{
 		JSONRPC: "2.0",

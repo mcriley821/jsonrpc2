@@ -7,62 +7,59 @@ import (
 )
 
 var (
-	// ErrClosed is returned by method calls of a closed Conn.
+	// ErrClosed is returned by method calls of a closed [Conn].
 	ErrClosed = errors.New("connection closed")
 )
 
-// ErrorCode is a JSON-RPC 2.0 error code. Application-defined codes should
-// be outside the reserved range [-32768, -32000].
+// ErrorCode is an error code. Standard codes are in the range [-32768, -32000];
+// application-defined codes should be outside this range.
 type ErrorCode = int
 
 const (
-	// ParseError indicates an error occurred on the server while parsing the JSON message.
+	// ParseError is returned when the JSON is malformed.
 	ParseError ErrorCode = -32700
 
-	// InvalidRequest indicates the JSON received is an invalid Request object.
+	// InvalidRequest is returned when the request object is invalid.
 	InvalidRequest ErrorCode = -32600
 
-	// MethodNotFound indicates the method does not exist or is not available.
+	// MethodNotFound is returned when the method does not exist.
 	MethodNotFound ErrorCode = -32601
 
-	// InvalidParams indicates invalid parameters for the requested method.
+	// InvalidParams is returned when the method arguments are invalid.
 	InvalidParams ErrorCode = -32602
 
-	// InternalError indicates an internal error occurred while processing.
+	// InternalError is returned for server-side processing errors.
 	InternalError ErrorCode = -32603
 )
 
-// Error represents a JSON-RPC 2.0 error object.
+// Error represents a request error with code, message, and optional data.
 type Error interface {
 	error
 
-	// Code returns the error code of this error.
+	// Code returns the error code.
 	Code() ErrorCode
 
-	// Message returns the human-readable description of the error.
+	// Message returns the error description.
 	Message() string
 
-	// Data returns the optional supplementary data attached to the error,
-	// or nil if none was provided.
+	// Data returns supplementary data, or nil.
 	Data() any
 }
 
-// errObj is the JSON-serializable form of a JSON-RPC 2.0 error object.
 type errObj struct {
 	Code    ErrorCode `json:"code"`
 	Message string    `json:"message"`
 	Data    any       `json:"data,omitzero"`
 }
 
-// rpcError is an implementation of Error.
 type rpcError struct {
 	obj errObj
 }
 
 var _ Error = (*rpcError)(nil)
 
-// NewError creates a new JSON-RPC 2.0 error with the given code, message, and
-// optional data.
+// NewError creates a new [Error].
+// Pass nil for data to omit the field.
 func NewError(code ErrorCode, message string, data any) Error {
 	return &rpcError{errObj{code, message, data}}
 }
