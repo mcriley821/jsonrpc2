@@ -432,3 +432,41 @@ func TestConn_Call_UnblockedOnClose(t *testing.T) {
 		require.ErrorIs(t, err, jsonrpc2.ErrClosed)
 	}
 }
+
+func TestConn_Replier_DoubleReply(t *testing.T) {
+	t.Parallel()
+
+	repliedCh := make(chan error, 2)
+
+	handler := jsonrpc2.HandlerFunc(func(ctx context.Context, _ jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+		repliedCh <- reply(ctx, "first")
+		repliedCh <- reply(ctx, "second")
+		return nil
+	})
+
+	conn, p := getTestConn(t, handler)
+	defer conn.Close(t.Context())
+
+	// Send a request from the peer side.
+	req := []byte(`{"jsonrpc":"2.0","id":"test-1","method":"test","params":null}`)
+	_, err := p.Write(req)
+	require.NoError(t, err)
+
+	// Drain the one real response so the write loop doesn't stall.
+	var resp json.RawMessage
+	require.NoError(t, json.NewDecoder(p).Decode(&resp))
+
+	select {
+	case <-t.Context().Done():
+		require.FailNow(t, "handler did not complete")
+	case err := <-repliedCh:
+		assert.NoError(t, err, "first reply should succeed")
+	}
+
+	select {
+	case <-t.Context().Done():
+		require.FailNow(t, "handler did not complete")
+	case err := <-repliedCh:
+		require.ErrorIs(t, err, jsonrpc2.ErrReplied, "second reply should return ErrReplied")
+	}
+}

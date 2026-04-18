@@ -9,6 +9,9 @@ import (
 var (
 	// ErrClosed is returned by method calls of a closed [Conn].
 	ErrClosed = errors.New("connection closed")
+
+	// ErrReplied is returned by a [Replier] that has already been called once.
+	ErrReplied = errors.New("reply already sent")
 )
 
 // ErrorCode is an error code. Standard codes are in the range [-32768, -32000];
