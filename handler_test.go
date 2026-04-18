@@ -192,7 +192,7 @@ func TestConnHandler_Notification(t *testing.T) {
 			assert.Equal(t, "notify", req.Method())
 			assert.Equal(t, json.RawMessage(nil), req.Params())
 
-			// Calling reply on a notification must be a no-op per JSON-RPC 2.0 §6.
+			// Calling reply on a notification must be a no-op.
 			return reply(ctx, "ignored")
 		},
 	))

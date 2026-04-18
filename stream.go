@@ -6,32 +6,29 @@ import (
 	"io"
 )
 
-// Stream wraps an io.ReadWriteCloser with JSON encoding and decoding.
-// Each Read/Write call exchanges a single complete JSON value.
+// Stream encodes and decodes JSON messages.
+// Each Read/Write call exchanges one complete JSON value.
+// Errors are fatal and cause [Conn] to close.
 type Stream interface {
-	// Read a message from the stream into v. A non-nil error is treated as
-	// fatal by Conn, which will close the connection in response.
+	// Read decodes one JSON value into v.
 	Read(v any) error
 
-	// Write a message to the stream. A non-nil error is treated as fatal
-	// by Conn, which will close the connection in response.
+	// Write encodes and sends one JSON value.
 	Write(obj any) error
 
-	// Close the stream.
+	// Close closes the underlying transport.
 	Close() error
 }
 
-// encoderStream is the unexported implementation of Stream.
 type encoderStream struct {
-	stream  io.ReadWriteCloser // underlying I/O transport
-	decoder *json.Decoder      // decodes incoming JSON
-	encoder *json.Encoder      // encodes outgoing JSON
+	stream  io.ReadWriteCloser
+	decoder *json.Decoder
+	encoder *json.Encoder
 }
 
 var _ Stream = (*encoderStream)(nil)
 
-// NewStream creates a Stream that encodes outgoing values and decodes incoming
-// values as newline-delimited JSON over stream.
+// NewStream creates a [Stream] over stream for newline-delimited JSON.
 func NewStream(stream io.ReadWriteCloser) Stream {
 	return &encoderStream{stream, json.NewDecoder(stream), json.NewEncoder(stream)}
 }

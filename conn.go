@@ -9,78 +9,49 @@ import (
 	"github.com/google/uuid"
 )
 
-// Conn is a full-duplex JSON-RPC 2.0 connection. It dispatches incoming
-// requests to the Handler provided to NewConn, and exposes Call and Notify
-// for sending outbound requests.
+// Conn is a full-duplex connection over a [Stream].
+// All methods are safe for concurrent use.
 type Conn interface {
-	// Call sends a JSON-RPC request for method with the given params and
-	// waits for the response. params is marshaled to JSON; pass nil to
-	// omit the params field. Returns the terminal errorif the connection
-	// shuts down before the response arrives, or a context error if ctx
-	// expires first.
+	// Call sends a request and waits for a response from the peer.
+	// It blocks until the response arrives, ctx is cancelled, or the connection closes.
+	// Returns an error if the connection is closed, ctx expires, or if marshaling the request fails.
 	Call(ctx context.Context, method string, params any) (Response, error)
 
-	// Notify sends a JSON-RPC notification (a request with no ID) for
-	// method with the given params. The server will not send a response.
-	// Returns the terminal error if the connection has already shut down.
+	// Notify sends a request without expecting a response.
+	// Returns an error if the connection is closed, ctx expires, or if marshaling the request fails.
 	Notify(ctx context.Context, method string, params any) error
 
-	// Close shuts down the connection. It is safe to call more than once.
-	// Returns any error from closing the underlying stream, or ctx.Err() if
-	// ctx expires before all background goroutines finish.
+	// Close gracefully shuts down the connection and waits for shutdown to complete.
+	// Safe to call multiple times. Returns an error if ctx expires before shutdown finishes.
 	Close(ctx context.Context) error
 
-	// Done returns a channel that is closed when the connection has fully shut
-	// down and all background goroutines have exited. It is safe for multiple
-	// goroutines to wait on the channel. Use Err to retrieve the terminal error.
+	// Done returns a channel that closes when the connection has fully shut down.
+	// Use [Conn.Err] to retrieve the terminal error.
 	Done() <-chan struct{}
 
-	// Err returns the terminal error once the connection has shut down. It
-	// returns nil until Done is closed. On a clean Close the value is
-	// ErrClosed; on an I/O or handler failure it is a wrapped error describing
-	// the cause.
+	// Err returns the terminal error, or nil if the connection is still running.
+	// Check [Conn.Done] first; Err is only valid after [Conn.Done] closes.
 	Err() error
 }
 
-// conn is an implementation of Conn.
+// conn is an implementation of [Conn].
 type conn struct {
-	// cancel terminates the background read/write goroutines.
 	cancel context.CancelFunc
 
-	// stream is the underlying transport.
-	stream Stream
-
-	// handler is responsible for dispatching incoming RPC requests.
+	stream  Stream
 	handler Handler
 
-	// outgoing is an unbuffered channel used to hand off outgoing messages to
-	// the write goroutine.
 	outgoing chan any
+	done     chan struct{}
 
-	// done is closed after all background goroutines have exited.
-	done chan struct{}
-
-	// shutdownOnce ensures teardown runs exactly once.
-	shutdownOnce sync.Once
-
-	// termErr is the first terminal error, set inside shutdownOnce.Do.
-	termErr error
-
-	// streamCloseErr is the error returned by stream.Close(), set inside
-	// shutdownOnce.Do.
+	shutdownOnce   sync.Once
+	termErr        error
 	streamCloseErr error
 
-	// wg tracks all background goroutines: read, write, and per-request handlers.
-	// done is closed only after wg reaches zero.
 	wg sync.WaitGroup
 
-	// inflight maps outgoing call IDs (always UUID strings) to their response
-	// channels.
 	inflight map[string]chan *response
 
-	// closed is set to true by shutdown under mu. registerRequest checks it
-	// under the same lock before inserting into inflight, eliminating the
-	// TOCTOU window between the closed check and the map write.
 	closed bool
 
 	// mu protects access to inflight and closed.
@@ -89,9 +60,9 @@ type conn struct {
 
 var _ Conn = (*conn)(nil)
 
-// NewConn creates a new Conn over stream, using handler to dispatch incoming
-// requests. It starts background goroutines for reading, writing, and lifecycle
-// management; use Done and Err to observe when they exit.
+// NewConn creates and starts a new [Conn] over stream that uses handler to dispatch
+// incoming requests. The connection runs until the peer closes, the handler returns
+// an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -119,6 +90,7 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 	return c
 }
 
+// Call sends a request and waits for a response. Pass nil for params to omit the field.
 func (c *conn) Call(ctx context.Context, method string, params any) (Response, error) {
 	id := uuid.NewString()
 
@@ -157,6 +129,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 	}
 }
 
+// Notify sends a notification. Pass nil for params to omit the field.
 func (c *conn) Notify(ctx context.Context, method string, params any) error {
 	select {
 	case <-c.done:
@@ -179,6 +152,8 @@ func (c *conn) Notify(ctx context.Context, method string, params any) error {
 	}
 }
 
+// Close gracefully shuts down the connection. It waits for all goroutines to exit
+// and returns any error from closing the underlying stream, or ctx.Err() if ctx expires first.
 func (c *conn) Close(ctx context.Context) error {
 	c.shutdown(ErrClosed)
 
@@ -190,10 +165,14 @@ func (c *conn) Close(ctx context.Context) error {
 	}
 }
 
+// Done returns a channel that closes when the connection has fully shut down.
+// Use [Conn.Err] to retrieve the terminal error.
 func (c *conn) Done() <-chan struct{} {
 	return c.done
 }
 
+// Err returns the terminal error, or nil if the connection is still running.
+// Check [Conn.Done] first; Err is only valid after [Conn.Done] closes.
 func (c *conn) Err() error {
 	select {
 	case <-c.done:
@@ -219,9 +198,8 @@ func (c *conn) registerRequest(id string, ch chan *response) error {
 	return nil
 }
 
-// shutdown records err as the terminal error (first call wins), cancels the
-// context, closes the underlying stream, and clears the inflight map. It is
-// safe to call concurrently and from multiple goroutines.
+// shutdown initiates connection shutdown. The first error recorded becomes
+// the terminal error. It is safe to call concurrently.
 func (c *conn) shutdown(err error) {
 	c.shutdownOnce.Do(func() {
 		c.termErr = err
@@ -237,10 +215,8 @@ func (c *conn) shutdown(err error) {
 	})
 }
 
-// run starts the read and write goroutines and waits for the first of:
-// context cancellation, a read error, or a write error. It calls shutdown with
-// the triggering error, waits for all goroutines to exit via wg, then closes
-// done to broadcast completion.
+// run manages the connection lifecycle. It exits when ctx is cancelled, a read error occurs,
+// or a write error occurs, then waits for all handler goroutines to finish before closing done.
 func (c *conn) run(ctx context.Context) {
 	defer func() {
 		c.wg.Wait()
@@ -250,7 +226,7 @@ func (c *conn) run(ctx context.Context) {
 	readDone := make(chan error, 1)
 	writeDone := make(chan error, 1)
 
-	c.wg.Add(2) //nolint:mnd // two goroutines: read and write
+	c.wg.Add(2)
 
 	go c.read(ctx, readDone)
 	go c.write(ctx, writeDone)
@@ -265,19 +241,14 @@ func (c *conn) run(ctx context.Context) {
 	}
 }
 
-// partialMessage is used to classify an incoming JSON-RPC message before full
-// deserialization. A non-empty Method indicates a request or notification; an
-// empty Method indicates a response.
+// partialMessage classifies an incoming message without full deserialization.
+// Method distinguishes requests from responses.
 type partialMessage struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 }
 
-// read loops reading JSON messages from the stream. Each message is partially
-// decoded to distinguish requests (have a method field) from responses, then
-// dispatched to handleRequest or handleResponse in a new goroutine. Any error
-// is sent to errChan and the loop exits. Context cancellation also exits the
-// loop; the stream must be closed externally to unblock any in-progress read.
+// read dispatches incoming messages until ctx is cancelled or an error occurs.
 func (c *conn) read(ctx context.Context, errChan chan<- error) {
 	defer c.wg.Done()
 
@@ -338,8 +309,7 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 	}
 }
 
-// write drains the outgoing channel, encoding each message to the stream.
-// Any write error is sent to errChan and the loop exits.
+// write sends outgoing messages until ctx is cancelled or an error occurs.
 func (c *conn) write(ctx context.Context, errChan chan<- error) {
 	defer c.wg.Done()
 
@@ -359,9 +329,8 @@ func (c *conn) write(ctx context.Context, errChan chan<- error) {
 	}
 }
 
-// handleRequest dispatches req to the handler. If the handler returns a
-// non-nil error, shutdown is called with the wrapped error, closing the
-// connection.
+// handleRequest invokes the handler for the incoming request.
+// If the handler returns an error, the connection is closed.
 func (c *conn) handleRequest(ctx context.Context, req *request) {
 	defer c.wg.Done()
 
@@ -370,10 +339,8 @@ func (c *conn) handleRequest(ctx context.Context, req *request) {
 	}
 }
 
-// handleResponse delivers resp to the Call goroutine waiting on the matching
-// request ID. Responses with non-string IDs are silently dropped, as all
-// outgoing call IDs are UUID strings. If no goroutine is waiting (request was
-// cancelled or the ID is unknown), the response is silently dropped.
+// handleResponse routes an incoming response to the waiting [Conn.Call] goroutine.
+// Unknown IDs and non-string IDs are silently dropped.
 func (c *conn) handleResponse(ctx context.Context, resp *response) {
 	defer c.wg.Done()
 
@@ -395,13 +362,11 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 	}
 }
 
-// replier returns a Replier closure bound to id. The closure builds an error
-// response when result is an Error, or marshals result as a success response,
-// then queues the response to the outgoing channel. If the message is a
-// notification (id == nil), a no-op closure is returned.
+// replier returns a [Replier] bound to the request ID.
+// Notifications (id == nil) return a no-op.
 func (c *conn) replier(id any) Replier {
 	if id == nil {
-		return func(_ context.Context, _ any) error { return nil }
+		return func(context.Context, any) error { return nil }
 	}
 
 	return func(ctx context.Context, result any) error {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 )
 
-// requestObj is the JSON-serializable form of a JSON-RPC 2.0 request object.
 type requestObj struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitzero"`
@@ -13,20 +12,19 @@ type requestObj struct {
 	Params  json.RawMessage `json:"params,omitzero"`
 }
 
-// Request represents an incoming JSON-RPC 2.0 request or notification.
+// Request represents an incoming request or notification.
 // Notifications have a nil ID.
 type Request interface {
-	// ID returns the request identifier, or nil for notifications.
+	// ID returns the request identifier, or nil for a notification.
 	ID() any
 
-	// Method returns the name of the RPC method being invoked.
+	// Method returns the method name.
 	Method() string
 
-	// Params returns the raw JSON params field, or nil if absent.
+	// Params returns the raw JSON params, or nil if absent.
 	Params() json.RawMessage
 }
 
-// request is an implementation of Request.
 type request struct {
 	obj requestObj
 }
@@ -62,9 +60,6 @@ func (r *request) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// newRequest constructs a request with the given id, method, and params.
-// Pass nil as id to create a notification. params is marshaled to JSON and
-// omitted from the wire message when nil.
 func newRequest(id any, method string, params any) (*request, error) {
 	var rawParams json.RawMessage
 
