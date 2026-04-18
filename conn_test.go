@@ -375,6 +375,34 @@ func TestConn_Call_Concurrent(t *testing.T) {
 	}
 }
 
+// TestConn_Call_TOCTOU races a Call against a Close. Run with -race to detect
+// any unsynchronised access in the window between the done-channel check and
+// the inflight-map insertion.
+func TestConn_Call_TOCTOU(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+	defer p.Close()
+
+	callDone := make(chan error, 1)
+
+	go func() {
+		_, err := conn.Call(t.Context(), "method", nil)
+		callDone <- err
+	}()
+
+	go func() { _ = conn.Close(t.Context()) }()
+
+	select {
+	case <-time.After(time.Second):
+		require.FailNow(t, "Call did not return after Close")
+	case err := <-callDone:
+		if err != nil {
+			require.ErrorIs(t, err, jsonrpc2.ErrClosed)
+		}
+	}
+}
+
 func TestConn_Call_UnblockedOnClose(t *testing.T) {
 	t.Parallel()
 

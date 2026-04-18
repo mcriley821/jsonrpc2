@@ -78,7 +78,12 @@ type conn struct {
 	// channels.
 	inflight map[string]chan *response
 
-	// mu protects access to inflight.
+	// closed is set to true by shutdown under mu. registerRequest checks it
+	// under the same lock before inserting into inflight, eliminating the
+	// TOCTOU window between the closed check and the map write.
+	closed bool
+
+	// mu protects access to inflight and closed.
 	mu sync.RWMutex
 }
 
@@ -115,12 +120,6 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 }
 
 func (c *conn) Call(ctx context.Context, method string, params any) (Response, error) {
-	select {
-	case <-c.done:
-		return nil, c.termErr
-	default:
-	}
-
 	id := uuid.NewString()
 
 	req, err := newRequest(id, method, params)
@@ -130,9 +129,9 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 
 	respCh := make(chan *response, 1)
 
-	c.mu.Lock()
-	c.inflight[id] = respCh
-	c.mu.Unlock()
+	if err := c.registerRequest(id, respCh); err != nil {
+		return nil, err
+	}
 
 	defer func() {
 		c.mu.Lock()
@@ -204,6 +203,22 @@ func (c *conn) Err() error {
 	}
 }
 
+// registerRequest registers ch under id in the inflight map. It holds mu for
+// the duration so that the closed check and the map insertion are a single
+// critical section, eliminating the TOCTOU window against shutdown.
+func (c *conn) registerRequest(id string, ch chan *response) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return c.termErr
+	}
+
+	c.inflight[id] = ch
+
+	return nil
+}
+
 // shutdown records err as the terminal error (first call wins), cancels the
 // context, closes the underlying stream, and clears the inflight map. It is
 // safe to call concurrently and from multiple goroutines.
@@ -214,11 +229,10 @@ func (c *conn) shutdown(err error) {
 		c.streamCloseErr = c.stream.Close()
 
 		c.mu.Lock()
-
+		c.closed = true
 		for id := range c.inflight {
 			delete(c.inflight, id)
 		}
-
 		c.mu.Unlock()
 	})
 }
