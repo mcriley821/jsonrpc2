@@ -64,6 +64,9 @@ var _ Conn = (*conn)(nil)
 // NewConn creates and starts a new [Conn] over stream that uses handler to dispatch
 // incoming requests. The connection runs until the peer closes, the handler returns
 // an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
+//
+// Batch requests (JSON-RPC 2.0 arrays) are not supported: the connection replies
+// with an [InvalidRequest] error (ID null) and continues processing.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -266,6 +269,20 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 				errChan <- fmt.Errorf("stream read: %w", err)
 
 				return
+			}
+
+			// Batch requests are not supported; respond with InvalidRequest and continue.
+			if len(raw) > 0 && raw[0] == '[' {
+				err := NewError(InvalidRequest, "batch requests are not supported", nil)
+
+				select {
+				case <-ctx.Done():
+					errChan <- ctx.Err()
+					return
+				case c.outgoing <- newErrorResponse(nil, err):
+				}
+
+				continue
 			}
 
 			var v partialMessage

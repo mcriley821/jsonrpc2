@@ -433,6 +433,34 @@ func TestConn_Call_UnblockedOnClose(t *testing.T) {
 	}
 }
 
+func TestConn_BatchRequest_InvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+	defer conn.Close(t.Context())
+
+	// Send a batch request from the peer.
+	batch := []byte(`[{"jsonrpc":"2.0","id":1,"method":"foo"}]`)
+	_, err := p.Write(batch)
+	require.NoError(t, err)
+
+	var resp struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Error   struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+
+	require.NoError(t, json.NewDecoder(p).Decode(&resp))
+	assert.Equal(t, "2.0", resp.JSONRPC)
+	assert.Nil(t, resp.ID)
+	assert.Equal(t, jsonrpc2.InvalidRequest, resp.Error.Code)
+
+	// Connection must still be usable after the batch error.
+	require.NoError(t, conn.Err())
+}
+
 func TestConn_Replier_DoubleReply(t *testing.T) {
 	t.Parallel()
 

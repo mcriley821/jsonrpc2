@@ -6,4 +6,10 @@
 // [Conn.Done] to observe shutdown.
 //
 // The [Mux] type provides per-method dispatch for both request handlers and notification handlers.
+//
+// # Limitations
+//
+// Batch requests (JSON arrays of request objects) are not supported.
+// A batch received by [Conn] is answered with a single [InvalidRequest] error response
+// (ID null) and the connection remains open.
 package jsonrpc2
