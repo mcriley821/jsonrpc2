@@ -55,7 +55,7 @@ type conn struct {
 	closed bool
 
 	// mu protects access to inflight and closed.
-	mu sync.RWMutex
+	mu sync.Mutex
 }
 
 var _ Conn = (*conn)(nil)
@@ -82,7 +82,7 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 		streamCloseErr: nil,
 		wg:             sync.WaitGroup{},
 		inflight:       make(map[string]chan *response),
-		mu:             sync.RWMutex{},
+		mu:             sync.Mutex{},
 	}
 
 	go c.run(ctx)
@@ -349,9 +349,13 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 		return
 	}
 
-	c.mu.RLock()
+	// Delete under the write lock so only one goroutine can claim the channel.
+	// A duplicate response arriving concurrently will find the entry already
+	// gone and return without sending. Call's deferred delete becomes a no-op.
+	c.mu.Lock()
 	ch, ok := c.inflight[id]
-	c.mu.RUnlock()
+	delete(c.inflight, id)
+	c.mu.Unlock()
 
 	if ok {
 		select {
