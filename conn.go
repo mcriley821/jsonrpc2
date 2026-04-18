@@ -84,7 +84,7 @@ type conn struct {
 	closed bool
 
 	// mu protects access to inflight and closed.
-	mu sync.RWMutex
+	mu sync.Mutex
 }
 
 var _ Conn = (*conn)(nil)
@@ -111,7 +111,7 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 		streamCloseErr: nil,
 		wg:             sync.WaitGroup{},
 		inflight:       make(map[string]chan *response),
-		mu:             sync.RWMutex{},
+		mu:             sync.Mutex{},
 	}
 
 	go c.run(ctx)
