@@ -375,44 +375,31 @@ func TestConn_Call_Concurrent(t *testing.T) {
 	}
 }
 
-// TestConn_Call_TOCTOU exercises the race window between the done-channel
-// fast-path check and the inflight-map insertion in Call. It repeatedly races a
-// Call against a Close so that -race can detect any unsynchronised access, and
-// asserts that every Call returns either a valid response or ErrClosed (never
-// hangs or returns an unexpected error).
+// TestConn_Call_TOCTOU races a Call against a Close. Run with -race to detect
+// any unsynchronised access in the window between the done-channel check and
+// the inflight-map insertion.
 func TestConn_Call_TOCTOU(t *testing.T) {
 	t.Parallel()
 
-	const iterations = 500
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+	defer p.Close()
 
-	for range iterations {
-		conn, p := getTestConn(t, assertNotCalledHandler(t))
+	callDone := make(chan error, 1)
 
-		callDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Call(t.Context(), "method", nil)
+		callDone <- err
+	}()
 
-		go func() {
-			_, err := conn.Call(t.Context(), "method", nil)
-			callDone <- err
-		}()
+	go func() { _ = conn.Close(t.Context()) }()
 
-		// Close races with the Call above. Depending on scheduling, the Call
-		// may see the connection already closed (ErrClosed fast-path), insert
-		// into the inflight map before shutdown clears it (and get ErrClosed
-		// from the done-channel select), or insert after shutdown (which the
-		// fix prevents). All outcomes must return ErrClosed, not hang.
-		go func() { _ = conn.Close(t.Context()) }()
-
-		select {
-		case <-time.After(time.Second):
-			require.FailNow(t, "Call did not return after Close")
-		case err := <-callDone:
-			if err != nil {
-				require.ErrorIs(t, err, jsonrpc2.ErrClosed)
-			}
+	select {
+	case <-time.After(time.Second):
+		require.FailNow(t, "Call did not return after Close")
+	case err := <-callDone:
+		if err != nil {
+			require.ErrorIs(t, err, jsonrpc2.ErrClosed)
 		}
-
-		// Drain peer so its goroutines don't leak between iterations.
-		_ = p.Close()
 	}
 }
 

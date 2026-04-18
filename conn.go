@@ -135,18 +135,9 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 
 	respCh := make(chan *response, 1)
 
-	// Atomically check the closed flag and insert into the inflight map.
-	// This eliminates the TOCTOU window between the done-channel fast-path
-	// check above and the map write: shutdown sets closed=true under mu
-	// before clearing the map, so the check and insert are either both
-	// before or both after shutdown runs.
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, c.termErr
+	if err := c.createRequest(id, respCh); err != nil {
+		return nil, err
 	}
-	c.inflight[id] = respCh
-	c.mu.Unlock()
 
 	defer func() {
 		c.mu.Lock()
@@ -216,6 +207,22 @@ func (c *conn) Err() error {
 	default:
 		return nil
 	}
+}
+
+// createRequest registers ch under id in the inflight map. It holds mu for
+// the duration so that the closed check and the map insertion are a single
+// critical section, eliminating the TOCTOU window against shutdown.
+func (c *conn) createRequest(id string, ch chan *response) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return c.termErr
+	}
+
+	c.inflight[id] = ch
+
+	return nil
 }
 
 // shutdown records err as the terminal error (first call wins), cancels the
