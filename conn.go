@@ -387,9 +387,7 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 	// gone and return without sending. Call's deferred delete becomes a no-op.
 	c.mu.Lock()
 	ch, ok := c.inflight[id]
-	if ok {
-		delete(c.inflight, id)
-	}
+	delete(c.inflight, id)
 	c.mu.Unlock()
 
 	if ok {
