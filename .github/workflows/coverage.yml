@@ -10,10 +10,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      actions: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -21,50 +17,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Test with coverage
-        run: go test -timeout 2s -race -coverprofile=coverage.out ./...
+        run: go test -timeout 2s -race -coverprofile=coverage.txt ./...
 
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          name: code-coverage
-          path: coverage.out
-
-      - name: PR coverage comment
-        if: github.event_name == 'pull_request'
-        uses: fgrosse/go-coverage-report@v1.3.0
-        with:
-          coverage-file-name: coverage.out
-
-      - name: Compute total coverage
-        id: cov
-        run: |
-          PCT=$(go tool cover -func=coverage.out | grep ^total | awk '{gsub(/%/, "", $3); printf "%.1f", $3}')
-          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
-
-      - name: Generate coverage badge JSON
-        run: |
-          PCT=${{ steps.cov.outputs.pct }}
-          COLOR=$(awk "BEGIN {
-            if ($PCT >= 85) print \"brightgreen\"
-            else if ($PCT >= 70) print \"yellowgreen\"
-            else if ($PCT >= 50) print \"yellow\"
-            else print \"red\"
-          }")
-          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$COLOR" > /tmp/coverage.json
-
-      - name: Publish coverage badge
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin badges 2>/dev/null || true
-          if git show-ref --verify --quiet refs/remotes/origin/badges; then
-            git checkout -B badges origin/badges
-          else
-            git checkout --orphan badges
-            git rm -rf . --quiet
-          fi
-          cp /tmp/coverage.json coverage.json
-          git add coverage.json
-          git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
-          git push -u origin badges
+          token: ${{ secrets.CODECOV_TOKEN }}
