@@ -169,6 +169,27 @@ go func() {
 }()
 ```
 
+## Batch requests
+
+`Conn.Batch` sends multiple requests and/or notifications as a single JSON-RPC 2.0 batch. Responses are returned in the order of the non-notification items; notifications produce no entry.
+
+```go
+results, err := conn.Batch(ctx, []jsonrpc2.BatchItem{
+    {Method: "add", Params: AddParams{A: 1, B: 2}},
+    {Method: "sub", Params: SubParams{A: 5, B: 3}},
+    {Method: "log", Params: LogParams{Message: "hi"}, Notification: true},
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, resp := range results { // 2 responses (the notification has none)
+    // ...
+}
+```
+
+Incoming batches are handled transparently: the registered `Handler` is invoked once per request in the batch, concurrently, and their replies are gathered into a single batch response on the wire. Notifications in an incoming batch are delivered to the handler but do not contribute a response. Per the spec, an empty batch (`[]`) receives a single `InvalidRequest` error response.
+
 ## Sending outbound requests from a handler
 
 The `conn Conn` parameter passed to every handler can be used to make outbound calls or send notifications back to the peer from within the handler:
