@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 
@@ -87,6 +88,7 @@ var _ Conn = (*conn)(nil)
 // incoming requests. The connection runs until the peer closes, the handler returns
 // an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
+	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
 	o := defaultConnOptions()
@@ -297,9 +299,7 @@ func (c *conn) registerRequests(pending map[string]chan *response) error {
 		return c.termErr
 	}
 
-	for id, ch := range pending {
-		c.inflight[id] = ch
-	}
+	maps.Copy(c.inflight, pending)
 
 	return nil
 }
@@ -551,11 +551,7 @@ func (c *conn) handleBatchItem(
 		return
 	}
 
-	inner.Add(1)
-
-	go func() {
-		defer inner.Done()
-
+	inner.Go(func() {
 		reply := c.makeReplier(req.ID(), func(_ context.Context, r *response) error {
 			collect(r)
 
@@ -565,7 +561,7 @@ func (c *conn) handleBatchItem(
 		if err := c.handler.ServeRPC(ctx, req, reply, c); err != nil {
 			c.shutdown(fmt.Errorf("handler error: %w", err))
 		}
-	}()
+	})
 }
 
 // sendMessage writes msg to outgoing, returning early on cancellation or shutdown.
