@@ -77,7 +77,7 @@ func TestConn_Batch_Empty(t *testing.T) {
 
 	conn, _ := getTestConn(t, assertNotCalledHandler(t))
 
-	resp, err := conn.Batch(t.Context(), nil)
+	resp, err := conn.Batch(t.Context())
 	require.Error(t, err)
 	assert.Nil(t, resp)
 }
@@ -87,9 +87,7 @@ func TestConn_Batch_BadParams(t *testing.T) {
 
 	conn, _ := getTestConn(t, assertNotCalledHandler(t))
 
-	resp, err := conn.Batch(t.Context(), []jsonrpc2.BatchItem{
-		{Method: "broken", Params: func() {}, Notification: false},
-	})
+	resp, err := conn.Batch(t.Context(), jsonrpc2.BatchCall("broken", func() {}))
 	require.Error(t, err)
 	assert.Nil(t, resp)
 }
@@ -102,7 +100,7 @@ func TestConn_Batch_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	resp, err := conn.Batch(ctx, []jsonrpc2.BatchItem{{Method: "m", Params: nil, Notification: false}})
+	resp, err := conn.Batch(ctx, jsonrpc2.BatchCall("m", nil))
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Nil(t, resp)
 }
@@ -114,7 +112,7 @@ func TestConn_Batch_ClosedConn(t *testing.T) {
 
 	require.NoError(t, conn.Close(t.Context()))
 
-	resp, err := conn.Batch(t.Context(), []jsonrpc2.BatchItem{{Method: "m", Params: nil, Notification: false}})
+	resp, err := conn.Batch(t.Context(), jsonrpc2.BatchCall("m", nil))
 	require.ErrorIs(t, err, jsonrpc2.ErrClosed)
 	assert.Nil(t, resp)
 }
@@ -129,10 +127,10 @@ func TestConn_Batch_AllNotifications(t *testing.T) {
 
 	go pipeBatchRespond(t, p, idsCh, errCh)
 
-	resp, err := conn.Batch(t.Context(), []jsonrpc2.BatchItem{
-		{Method: "m1", Params: nil, Notification: true},
-		{Method: "m2", Params: nil, Notification: true},
-	})
+	resp, err := conn.Batch(t.Context(),
+		jsonrpc2.BatchNotification("m1", nil),
+		jsonrpc2.BatchNotification("m2", nil),
+	)
 	require.NoError(t, err)
 	assert.Nil(t, resp)
 
@@ -155,13 +153,13 @@ func TestConn_Batch_Mixed(t *testing.T) {
 	go pipeBatchRespond(t, p, idsCh, errCh)
 
 	items := []jsonrpc2.BatchItem{
-		{Method: "a", Params: 1, Notification: false},
-		{Method: "log", Params: "hi", Notification: true},
-		{Method: "b", Params: 2, Notification: false},
-		{Method: "c", Params: 3, Notification: false},
+		jsonrpc2.BatchCall("a", 1),
+		jsonrpc2.BatchNotification("log", "hi"),
+		jsonrpc2.BatchCall("b", 2),
+		jsonrpc2.BatchCall("c", 3),
 	}
 
-	resp, err := conn.Batch(t.Context(), items)
+	resp, err := conn.Batch(t.Context(), items...)
 	require.NoError(t, err)
 	require.Len(t, resp, 3, "expected 3 responses (one per non-notification)")
 
@@ -211,14 +209,14 @@ func TestConn_Batch_WireFormat(t *testing.T) {
 
 	// Fire Batch in the background because it blocks waiting for replies.
 	go func() {
-		_, _ = conn.Batch(t.Context(), []jsonrpc2.BatchItem{
-			{Method: "one", Params: nil, Notification: false},
-			{Method: "two", Params: nil, Notification: true},
-		})
+		_, _ = conn.Batch(t.Context(),
+			jsonrpc2.BatchCall("one", nil),
+			jsonrpc2.BatchNotification("two", nil),
+		)
 	}()
 
 	select {
-	case <-time.After(time.Second):
+	case <-t.Context().Done():
 		require.FailNow(t, "timeout waiting for batch on wire")
 	case err := <-errCh:
 		require.FailNow(t, err.Error())
@@ -308,7 +306,7 @@ func TestConn_HandleBatch_AllNotifications_NoResponse(t *testing.T) {
 	// Both notifications must be delivered.
 	for range 2 {
 		select {
-		case <-time.After(time.Second):
+		case <-t.Context().Done():
 			require.FailNow(t, "notification handler not called")
 		case <-called:
 		}
@@ -454,10 +452,10 @@ func TestConn_Batch_Concurrent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 
-			results[i], errs[i] = conn.Batch(t.Context(), []jsonrpc2.BatchItem{
-				{Method: "m", Params: i*10 + 1, Notification: false},
-				{Method: "m", Params: i*10 + 2, Notification: false},
-			})
+			results[i], errs[i] = conn.Batch(t.Context(),
+				jsonrpc2.BatchCall("m", i*10+1),
+				jsonrpc2.BatchCall("m", i*10+2),
+			)
 		}(i)
 	}
 

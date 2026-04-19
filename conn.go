@@ -24,13 +24,10 @@ type Conn interface {
 	// Returns an error if the connection is closed, ctx expires, or if marshaling the request fails.
 	Notify(ctx context.Context, method string, params any) error
 
-	// Batch sends items as a single JSON-RPC 2.0 batch request and waits for
-	// responses. It returns one [Response] per non-notification item, in the
-	// same order those items appeared in items. If items contains only
-	// notifications, the returned slice is nil and err is nil on success.
-	// Returns an error if items is empty, the connection closes, ctx expires,
-	// or marshaling any request fails.
-	Batch(ctx context.Context, items []BatchItem) ([]Response, error)
+	// Batch sends items as a single batch and returns one [Response] per
+	// non-notification item, in input order. Returns nil responses if every
+	// item is a notification.
+	Batch(ctx context.Context, items ...BatchItem) ([]Response, error)
 
 	// Close gracefully shuts down the connection and waits for shutdown to complete.
 	// Safe to call multiple times. Returns an error if ctx expires before shutdown finishes.
@@ -45,17 +42,25 @@ type Conn interface {
 	Err() error
 }
 
-// BatchItem is a single item in an outbound batch sent via [Conn.Batch].
+// BatchItem is a single entry in an outbound batch sent via [Conn.Batch].
+// Construct one with [BatchCall] or [BatchNotification].
 type BatchItem struct {
-	// Method is the JSON-RPC method name.
-	Method string
+	method       string
+	params       any
+	notification bool
+}
 
-	// Params are the parameters for the call. Pass nil to omit the field.
-	Params any
+// BatchCall returns a [BatchItem] that, when sent via [Conn.Batch], behaves
+// like [Conn.Call]: it produces a response. Pass nil for params to omit the field.
+func BatchCall(method string, params any) BatchItem {
+	return BatchItem{method: method, params: params, notification: false}
+}
 
-	// Notification, when true, sends this item as a notification: no ID is
-	// assigned and no response is expected.
-	Notification bool
+// BatchNotification returns a [BatchItem] that, when sent via [Conn.Batch],
+// behaves like [Conn.Notify]: no response is produced. Pass nil for params to
+// omit the field.
+func BatchNotification(method string, params any) BatchItem {
+	return BatchItem{method: method, params: params, notification: true}
 }
 
 // conn is an implementation of [Conn].
@@ -88,7 +93,6 @@ var _ Conn = (*conn)(nil)
 // incoming requests. The connection runs until the peer closes, the handler returns
 // an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
-	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
 	o := defaultConnOptions()
@@ -174,9 +178,8 @@ func (c *conn) Notify(ctx context.Context, method string, params any) error {
 	}
 }
 
-// Batch sends items as a single JSON-RPC 2.0 batch request and waits for
-// responses. See [Conn.Batch] for semantics.
-func (c *conn) Batch(ctx context.Context, items []BatchItem) ([]Response, error) {
+// Batch sends items as a single batch. See [Conn.Batch] for semantics.
+func (c *conn) Batch(ctx context.Context, items ...BatchItem) ([]Response, error) {
 	if len(items) == 0 {
 		return nil, errors.New("empty batch")
 	}
@@ -248,7 +251,7 @@ func buildBatchRequests(items []BatchItem) ([]*request, map[string]chan *respons
 	for i, item := range items {
 		var id any
 
-		if !item.Notification {
+		if !item.notification {
 			idStr := uuid.NewString()
 			id = idStr
 			ch := make(chan *response, 1)
@@ -256,7 +259,7 @@ func buildBatchRequests(items []BatchItem) ([]*request, map[string]chan *respons
 			order = append(order, idStr)
 		}
 
-		req, err := newRequest(id, item.Method, item.Params)
+		req, err := newRequest(id, item.method, item.params)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("creating batch item %d: %w", i, err)
 		}
@@ -420,57 +423,67 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 	}
 }
 
-// dispatchMessage classifies a single raw message as a request or response
-// and schedules a goroutine to handle it. Returns a non-nil error only for
-// malformed messages that should terminate the connection.
-func (c *conn) dispatchMessage(ctx context.Context, raw json.RawMessage) error {
+// parseMessage classifies raw as either a request or response message.
+// Exactly one of req/resp is non-nil on success; a non-nil error indicates
+// malformed input.
+func parseMessage(raw json.RawMessage) (*request, *response, error) {
 	var v partialMessage
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return fmt.Errorf("message unmarshal: %w", err)
+		return nil, nil, fmt.Errorf("message unmarshal: %w", err)
 	}
 
 	if v.JSONRPC != "2.0" {
-		return fmt.Errorf(`unsupported jsonrpc ("2.0" != %s)`, v.JSONRPC)
+		return nil, nil, fmt.Errorf(`unsupported jsonrpc ("2.0" != %s)`, v.JSONRPC)
 	}
 
 	if v.Method == "" {
 		resp := new(response)
-
 		if err := json.Unmarshal(raw, &resp); err != nil {
-			return fmt.Errorf("response unmarshal: %w", err)
+			return nil, nil, fmt.Errorf("response unmarshal: %w", err)
 		}
 
-		c.wg.Add(1)
-
-		go c.handleResponse(ctx, resp)
-
-		return nil
+		return nil, resp, nil
 	}
 
 	req := new(request)
-
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return fmt.Errorf("request unmarshal: %w", err)
+		return nil, nil, fmt.Errorf("request unmarshal: %w", err)
+	}
+
+	return req, nil, nil
+}
+
+// dispatchMessage classifies a single raw message and schedules a goroutine
+// to handle it. Returns a non-nil error only for malformed input.
+func (c *conn) dispatchMessage(ctx context.Context, raw json.RawMessage) error {
+	req, resp, err := parseMessage(raw)
+	if err != nil {
+		return err
 	}
 
 	c.wg.Add(1)
 
-	go c.handleRequest(ctx, req)
+	if resp != nil {
+		go c.handleResponse(ctx, resp)
+	} else {
+		go c.handleRequest(ctx, req)
+	}
 
 	return nil
 }
 
-// handleBatch processes an incoming batch message. Requests in the batch are
-// dispatched to the handler with a batch-aware replier; their responses are
-// collected and sent as a single array. Responses in the batch are routed to
-// waiting callers via the inflight map, exactly as single responses are.
-// An empty batch produces a single InvalidRequest error response per spec.
+// handleBatch processes an incoming batch message. Each request in the batch
+// is dispatched to the handler concurrently; the collected replies are sent
+// as a single outbound batch. Responses inside the batch route through the
+// inflight map, exactly as single responses do. An empty batch or a parse
+// failure on the batch envelope produces a single InvalidRequest reply (the
+// connection stays open).
 func (c *conn) handleBatch(ctx context.Context, raw json.RawMessage) {
 	defer c.wg.Done()
 
 	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
-		c.shutdown(fmt.Errorf("batch unmarshal: %w", err))
+		c.sendMessage(ctx, newErrorResponse(nil, NewError(InvalidRequest, err.Error(), nil)))
 
 		return
 	}
@@ -481,27 +494,7 @@ func (c *conn) handleBatch(ctx context.Context, raw json.RawMessage) {
 		return
 	}
 
-	var (
-		mu        sync.Mutex
-		responses []*response
-		inner     sync.WaitGroup
-	)
-
-	collect := func(r *response) {
-		mu.Lock()
-		defer mu.Unlock()
-
-		responses = append(responses, r)
-	}
-
-	for _, item := range items {
-		c.handleBatchItem(ctx, item, &inner, collect)
-	}
-
-	inner.Wait()
-
-	// inner.Wait completing synchronises-with every collect: it is safe to
-	// read responses without holding mu here.
+	responses := c.collectBatchResponses(ctx, items)
 	if len(responses) == 0 {
 		return
 	}
@@ -509,59 +502,54 @@ func (c *conn) handleBatch(ctx context.Context, raw json.RawMessage) {
 	c.sendMessage(ctx, responses)
 }
 
-// handleBatchItem classifies one element of a batch. Invalid items and
-// requests produce entries via collect; responses are routed through the
-// inflight map. Request handlers run concurrently and are tracked by inner.
-func (c *conn) handleBatchItem(
-	ctx context.Context,
-	item json.RawMessage,
-	inner *sync.WaitGroup,
-	collect func(*response),
-) {
-	var v partialMessage
-	if err := json.Unmarshal(item, &v); err != nil {
-		collect(newErrorResponse(nil, NewError(InvalidRequest, err.Error(), nil)))
+// collectBatchResponses dispatches each item concurrently and returns the
+// gathered responses. Items that fail to parse contribute an InvalidRequest
+// entry; incoming responses are routed via the inflight map and contribute
+// nothing to the returned slice.
+func (c *conn) collectBatchResponses(ctx context.Context, items []json.RawMessage) []*response {
+	// Buffered to len(items) so sends never block; drained after inner.Wait.
+	sink := make(chan *response, len(items))
 
-		return
-	}
+	var inner sync.WaitGroup
 
-	if v.JSONRPC != "2.0" {
-		collect(newErrorResponse(nil, NewError(InvalidRequest, "invalid jsonrpc version", nil)))
+	for _, item := range items {
+		req, resp, err := parseMessage(item)
+		if err != nil {
+			sink <- newErrorResponse(nil, NewError(InvalidRequest, err.Error(), nil))
 
-		return
-	}
-
-	if v.Method == "" {
-		resp := new(response)
-		if err := json.Unmarshal(item, &resp); err != nil {
-			return
+			continue
 		}
 
-		c.wg.Add(1)
+		if resp != nil {
+			c.wg.Add(1)
 
-		go c.handleResponse(ctx, resp)
+			go c.handleResponse(ctx, resp)
 
-		return
-	}
+			continue
+		}
 
-	req := new(request)
-	if err := json.Unmarshal(item, &req); err != nil {
-		collect(newErrorResponse(nil, NewError(InvalidRequest, err.Error(), nil)))
-
-		return
-	}
-
-	inner.Go(func() {
 		reply := c.makeReplier(req.ID(), func(_ context.Context, r *response) error {
-			collect(r)
+			sink <- r
 
 			return nil
 		})
 
-		if err := c.handler.ServeRPC(ctx, req, reply, c); err != nil {
-			c.shutdown(fmt.Errorf("handler error: %w", err))
-		}
-	})
+		inner.Go(func() {
+			if err := c.handler.ServeRPC(ctx, req, reply, c); err != nil {
+				c.shutdown(fmt.Errorf("handler error: %w", err))
+			}
+		})
+	}
+
+	inner.Wait()
+	close(sink)
+
+	responses := make([]*response, 0, len(items))
+	for r := range sink {
+		responses = append(responses, r)
+	}
+
+	return responses
 }
 
 // sendMessage writes msg to outgoing, returning early on cancellation or shutdown.
