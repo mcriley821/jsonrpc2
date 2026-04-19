@@ -141,7 +141,7 @@ func TestConn_Notify(t *testing.T) {
 		cancel()
 
 		err := conn.Notify(ctx, "", nil)
-		assert.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
 	})
 
 	t.Run("closed conn", func(t *testing.T) {
@@ -152,7 +152,7 @@ func TestConn_Notify(t *testing.T) {
 		require.NoError(t, conn.Close(t.Context()))
 
 		err := conn.Notify(t.Context(), "", nil)
-		assert.Error(t, err)
+		require.ErrorIs(t, err, jsonrpc2.ErrClosed)
 	})
 
 	t.Run("ok", func(t *testing.T) {
