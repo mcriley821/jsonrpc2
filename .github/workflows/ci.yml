@@ -1,4 +1,4 @@
-name: CI
+name: Lint
 
 on:
   pull_request:
@@ -8,8 +8,8 @@ on:
     tags: [ "v*" ]
 
 jobs:
-  check:
-    name: Check
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -20,8 +20,6 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-      - name: Test
-        run: go test -timeout 2s -race ./...
       - name: Format
         run: |
           if [ -n "$(gofmt -l .)" ]; then
