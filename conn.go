@@ -65,6 +65,7 @@ var _ Conn = (*conn)(nil)
 // incoming requests. The connection runs until the peer closes, the handler returns
 // an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
+	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
 	o := defaultConnOptions()
@@ -83,6 +84,7 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 		streamCloseErr: nil,
 		wg:             sync.WaitGroup{},
 		inflight:       make(map[string]chan *response),
+		closed:         false,
 		mu:             sync.Mutex{},
 	}
 
@@ -209,6 +211,7 @@ func (c *conn) shutdown(err error) {
 
 		c.mu.Lock()
 		c.closed = true
+
 		for id := range c.inflight {
 			delete(c.inflight, id)
 		}
@@ -227,6 +230,7 @@ func (c *conn) run(ctx context.Context) {
 	readDone := make(chan error, 1)
 	writeDone := make(chan error, 1)
 
+	//nolint:mnd // read and write goroutines
 	c.wg.Add(2)
 
 	go c.read(ctx, readDone)
