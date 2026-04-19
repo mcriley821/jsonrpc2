@@ -1,7 +1,7 @@
 # jsonrpc2
 
 [![Lint](https://github.com/mcriley821/jsonrpc2/actions/workflows/ci.yml/badge.svg)](https://github.com/mcriley821/jsonrpc2/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/mcriley821/jsonrpc2/graph/badge.svg)](https://codecov.io/gh/mcriley821/jsonrpc2)
+[![codecov](https://codecov.io/github/mcriley821/jsonrpc2/graph/badge.svg?token=TJVCJ0K7HN)](https://codecov.io/github/mcriley821/jsonrpc2)
 
 A Go library implementing [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over any `io.ReadWriteCloser` (TCP, Unix socket, stdin/stdout, etc.).
 
