@@ -17,6 +17,7 @@ type Replier func(ctx context.Context, result any) error
 // HandlerFunc is a function that implements [Handler].
 type HandlerFunc func(ctx context.Context, req Request, reply Replier, conn Conn) error
 
+// ServeRPC delegates to the wrapped function.
 func (f HandlerFunc) ServeRPC(ctx context.Context, req Request, reply Replier, conn Conn) error {
 	return f(ctx, req, reply, conn)
 }

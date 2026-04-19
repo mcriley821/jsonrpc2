@@ -61,6 +61,8 @@ func (m *Mux) Fallback(h Handler) {
 	m.fallback = h
 }
 
+// ServeRPC handles the incoming request by forwarding to the registered method
+// handler, falling back to [Mux.Fallback] when there is no registered handler.
 func (m *Mux) ServeRPC(ctx context.Context, req Request, reply Replier, conn Conn) error {
 	m.mu.RLock()
 	h, ok := m.handlers[req.Method()]

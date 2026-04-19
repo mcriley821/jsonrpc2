@@ -23,6 +23,9 @@ func newTestStream(t *testing.T) (*testStream, net.Conn) {
 
 	c1, c2 := net.Pipe()
 
+	t.Cleanup(func() { _ = c1.Close() })
+	t.Cleanup(func() { _ = c2.Close() })
+
 	return &testStream{c1, false}, c2
 }
 

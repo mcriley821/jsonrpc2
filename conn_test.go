@@ -33,8 +33,12 @@ func getTestConn(t *testing.T, handler jsonrpc2.Handler) (jsonrpc2.Conn, net.Con
 	stream := jsonrpc2.NewStream(s)
 	require.NotNil(t, stream)
 
+	t.Cleanup(func() { _ = stream.Close() })
+
 	conn := jsonrpc2.NewConn(t.Context(), stream, handler)
 	require.NotNil(t, conn)
+
+	t.Cleanup(func() { _ = conn.Close(t.Context()) })
 
 	return conn, p
 }
@@ -381,8 +385,7 @@ func TestConn_Call_Concurrent(t *testing.T) {
 func TestConn_Call_TOCTOU(t *testing.T) {
 	t.Parallel()
 
-	conn, p := getTestConn(t, assertNotCalledHandler(t))
-	defer p.Close()
+	conn, _ := getTestConn(t, assertNotCalledHandler(t))
 
 	callDone := make(chan error, 1)
 
@@ -438,14 +441,15 @@ func TestConn_Replier_DoubleReply(t *testing.T) {
 
 	repliedCh := make(chan error, 2)
 
-	handler := jsonrpc2.HandlerFunc(func(ctx context.Context, _ jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+	handler := func(ctx context.Context, _ jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
 		repliedCh <- reply(ctx, "first")
-		repliedCh <- reply(ctx, "second")
-		return nil
-	})
 
-	conn, p := getTestConn(t, handler)
-	defer conn.Close(t.Context())
+		repliedCh <- reply(ctx, "second")
+
+		return nil
+	}
+
+	_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
 
 	// Send a request from the peer side.
 	req := []byte(`{"jsonrpc":"2.0","id":"test-1","method":"test","params":null}`)
@@ -460,7 +464,7 @@ func TestConn_Replier_DoubleReply(t *testing.T) {
 	case <-t.Context().Done():
 		require.FailNow(t, "handler did not complete")
 	case err := <-repliedCh:
-		assert.NoError(t, err, "first reply should succeed")
+		require.NoError(t, err, "first reply should succeed")
 	}
 
 	select {
