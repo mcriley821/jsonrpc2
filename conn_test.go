@@ -570,24 +570,23 @@ func TestConn_Batch_Client(t *testing.T) {
 		peerErr <- err
 	}()
 
-	calls := []jsonrpc2.BatchCall{
-		{Method: "echo", Params: 1},
-		{Method: "ping", Notify: true},
-		{Method: "echo", Params: 3},
-	}
-
-	responses, err := conn.Batch(t.Context(), calls)
+	responses, err := conn.Batch(t.Context(),
+		jsonrpc2.BatchCall{Method: "echo", Params: 1},
+		jsonrpc2.BatchCall{Method: "ping", Notify: true},
+		jsonrpc2.BatchCall{Method: "echo", Params: 3},
+	)
 	require.NoError(t, err)
-	require.Len(t, responses, 3)
-	assert.NotNil(t, responses[0])
-	assert.Nil(t, responses[1]) // notification entry
-	assert.NotNil(t, responses[2])
+	require.Len(t, responses, 2) // notifications excluded
 
-	var v0, v2 int
-	require.NoError(t, responses[0].Result(&v0))
-	require.NoError(t, responses[2].Result(&v2))
-	assert.Equal(t, 1, v0)
-	assert.Equal(t, 3, v2)
+	byResult := make(map[int]bool)
+	for _, resp := range responses {
+		require.NotNil(t, resp)
+		var v int
+		require.NoError(t, resp.Result(&v))
+		byResult[v] = true
+	}
+	assert.True(t, byResult[1])
+	assert.True(t, byResult[3])
 
 	require.NoError(t, <-peerErr)
 }
@@ -598,7 +597,7 @@ func TestConn_Batch_Client_Empty(t *testing.T) {
 	conn, _ := getTestConn(t, assertNotCalledHandler(t))
 	defer conn.Close(t.Context())
 
-	responses, err := conn.Batch(t.Context(), nil)
+	responses, err := conn.Batch(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, responses)
 }

@@ -25,10 +25,9 @@ type Conn interface {
 	// Returns an error if the connection is closed, ctx expires, or if marshaling the request fails.
 	Call(ctx context.Context, method string, params any) (Response, error)
 
-	// Batch sends multiple JSON-RPC 2.0 requests as a single batch.
-	// The returned slice has the same length and order as calls.
-	// Entries with Notify true are sent as notifications and return nil at that index.
-	Batch(ctx context.Context, calls []BatchCall) ([]Response, error)
+	// Batch sends multiple requests as a single batch.
+	// Responses are returned only for non-notification entries, in no guaranteed order.
+	Batch(ctx context.Context, calls ...BatchCall) ([]Response, error)
 
 	// Notify sends a request without expecting a response.
 	// Returns an error if the connection is closed, ctx expires, or if marshaling the request fails.
@@ -55,6 +54,7 @@ type conn struct {
 	handler Handler
 
 	outgoing chan any
+	replies  chan *response
 	done     chan struct{}
 
 	shutdownOnce   sync.Once
@@ -77,8 +77,7 @@ var _ Conn = (*conn)(nil)
 // incoming requests. The connection runs until the peer closes, the handler returns
 // an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
 //
-// Batch requests (JSON-RPC 2.0 arrays) are supported: each element is dispatched
-// to handler concurrently and responses are sent as a single JSON array.
+// Incoming batch requests are supported: each element is dispatched to handler concurrently.
 func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -92,6 +91,7 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 		stream:         stream,
 		handler:        handler,
 		outgoing:       make(chan any),
+		replies:        make(chan *response),
 		done:           make(chan struct{}),
 		shutdownOnce:   sync.Once{},
 		termErr:        nil,
@@ -145,11 +145,11 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 	}
 }
 
-// Batch sends a batch of JSON-RPC 2.0 requests in a single round-trip.
-// The returned slice has the same length and order as calls; notification entries are nil.
-func (c *conn) Batch(ctx context.Context, calls []BatchCall) ([]Response, error) {
+// Batch sends multiple requests as a single batch.
+// Responses are returned only for non-notification entries, in no guaranteed order.
+func (c *conn) Batch(ctx context.Context, calls ...BatchCall) ([]Response, error) {
 	if len(calls) == 0 {
-		return []Response{}, nil
+		return nil, nil
 	}
 
 	type entry struct {
@@ -212,9 +212,9 @@ func (c *conn) Batch(ctx context.Context, calls []BatchCall) ([]Response, error)
 	case c.outgoing <- reqs:
 	}
 
-	responses := make([]Response, len(entries))
+	var responses []Response
 
-	for i, e := range entries {
+	for _, e := range entries {
 		if e.respCh == nil {
 			continue
 		}
@@ -225,7 +225,7 @@ func (c *conn) Batch(ctx context.Context, calls []BatchCall) ([]Response, error)
 		case <-c.done:
 			return nil, c.termErr
 		case resp := <-e.respCh:
-			responses[i] = resp
+			responses = append(responses, resp)
 		}
 	}
 
@@ -372,15 +372,20 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 
 			if len(raw) > 0 && raw[0] == '[' {
 				var batch []json.RawMessage
-				if err := json.Unmarshal(raw, &batch); err != nil {
-					errChan <- fmt.Errorf("batch unmarshal: %w", err)
+				if err := json.Unmarshal(raw, &batch); err != nil || len(batch) == 0 {
+					select {
+					case <-ctx.Done():
+						errChan <- ctx.Err()
+						return
+					case c.replies <- newErrorResponse(nil, NewError(InvalidRequest, "invalid batch", nil)):
+					}
 
-					return
+					continue
 				}
 
 				// Peek at the first element to distinguish a batch of requests
-				// (has "method") from a batch of responses (returned by a peer
-				// to a [Conn.Batch] call).
+				// (has "method") from a batch of responses returned by a peer
+				// to a [Conn.Batch] call.
 				isRequestBatch := false
 				for _, elem := range batch {
 					var partial partialMessage
@@ -390,7 +395,7 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 					}
 				}
 
-				if isRequestBatch || len(batch) == 0 {
+				if isRequestBatch {
 					c.wg.Add(1)
 					go c.handleBatch(ctx, batch)
 				} else {
@@ -443,7 +448,7 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 
 				c.wg.Add(1)
 
-				go c.handleRequest(ctx, req, &c.wg, c.replier(req.ID(), c.deliver))
+				go c.handleRequest(ctx, req, &c.wg, c.replies)
 			}
 		}
 	}
@@ -465,69 +470,56 @@ func (c *conn) write(ctx context.Context, errChan chan<- error) {
 
 				return
 			}
+		case resp := <-c.replies:
+			if err := c.stream.Write(resp); err != nil {
+				errChan <- fmt.Errorf("stream write: %w", err)
+
+				return
+			}
 		}
 	}
 }
 
 // handleRequest invokes the handler for the incoming request.
 // If the handler returns an error, the connection is closed.
-func (c *conn) handleRequest(ctx context.Context, req *request, wg *sync.WaitGroup, replier Replier) {
+func (c *conn) handleRequest(ctx context.Context, req *request, wg *sync.WaitGroup, out chan<- *response) {
 	defer wg.Done()
 
-	if err := c.handler.ServeRPC(ctx, req, replier, c); err != nil {
+	if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID(), out), c); err != nil {
 		c.shutdown(fmt.Errorf("handler error: %w", err))
 	}
 }
 
-// handleBatch processes a JSON-RPC 2.0 batch. Each element is dispatched
-// concurrently; responses are collected and sent as a single JSON array.
-// An empty batch is rejected with InvalidRequest. Notifications are processed
-// but excluded from the response array; if the batch contains only notifications
-// no response is sent, per the spec.
+// handleBatch dispatches each element of a non-empty batch concurrently,
+// collects responses, and sends them as a single JSON array.
+// Notifications are processed but excluded from the response array;
+// an all-notification batch sends no response, per the spec.
 func (c *conn) handleBatch(ctx context.Context, batch []json.RawMessage) {
 	defer c.wg.Done()
 
-	if len(batch) == 0 {
-		err := NewError(InvalidRequest, "empty batch", nil)
-
-		select {
-		case <-ctx.Done():
-		case c.outgoing <- newErrorResponse(nil, err):
-		}
-
-		return
-	}
-
-	var (
-		mu        sync.Mutex
-		responses []*response
-	)
+	out := make(chan *response, len(batch))
 
 	var wg sync.WaitGroup
 
 	for _, elem := range batch {
 		req := new(request)
 		if err := json.Unmarshal(elem, req); err != nil || req.obj.JSONRPC != "2.0" || req.obj.Method == "" {
-			mu.Lock()
-			responses = append(responses, newErrorResponse(nil, NewError(InvalidRequest, "invalid request object", nil)))
-			mu.Unlock()
+			out <- newErrorResponse(nil, NewError(InvalidRequest, "invalid request object", nil))
 
 			continue
 		}
 
-		deliver := func(_ context.Context, resp *response) error {
-			mu.Lock()
-			responses = append(responses, resp)
-			mu.Unlock()
-
-			return nil
-		}
-
 		wg.Add(1)
-		go c.handleRequest(ctx, req, &wg, c.replier(req.ID(), deliver))
+		go c.handleRequest(ctx, req, &wg, out)
 	}
 
 	wg.Wait()
+	close(out)
+
+	var responses []*response
+	for resp := range out {
+		responses = append(responses, resp)
+	}
 
 	if len(responses) == 0 {
 		return
@@ -566,23 +558,12 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 	}
 }
 
-// deliver sends resp to the stream, blocking until written, ctx cancels, or the connection closes.
-func (c *conn) deliver(ctx context.Context, resp *response) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err() //nolint:wrapcheck
-	case <-c.done:
-		return ErrClosed
-	case c.outgoing <- resp:
-		return nil
-	}
-}
-
 // replier returns a [Replier] bound to the request ID.
 // Notifications (id == nil) return a no-op.
-// deliver is called with the built response; pass [conn.deliver] for normal use.
+// Built responses are sent to out; for normal single-request use pass c.replies,
+// for batch use pass a local buffered channel.
 // The returned Replier returns [ErrReplied] on any call after the first.
-func (c *conn) replier(id any, deliver func(context.Context, *response) error) Replier {
+func (c *conn) replier(id any, out chan<- *response) Replier {
 	if id == nil {
 		return func(context.Context, any) error { return nil }
 	}
@@ -604,6 +585,13 @@ func (c *conn) replier(id any, deliver func(context.Context, *response) error) R
 			resp = newResponse(id, data)
 		}
 
-		return deliver(ctx, resp)
+		select {
+		case <-ctx.Done():
+			return ctx.Err() //nolint:wrapcheck
+		case <-c.done:
+			return ErrClosed
+		case out <- resp:
+			return nil
+		}
 	}
 }
