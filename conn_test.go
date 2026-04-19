@@ -527,6 +527,82 @@ func TestConn_Batch_NotificationsOnly(t *testing.T) {
 	assert.Equal(t, "z", resp.ID)
 }
 
+func TestConn_Batch_Client(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+	defer conn.Close(t.Context())
+
+	peerErr := make(chan error, 1)
+
+	go func() {
+		// Read the outgoing batch sent by conn.
+		var incoming []struct {
+			ID     any             `json:"id"`
+			Params json.RawMessage `json:"params"`
+		}
+
+		if err := json.NewDecoder(p).Decode(&incoming); err != nil {
+			peerErr <- err
+			return
+		}
+
+		// Echo each non-notification entry back as a response.
+		var resps []map[string]any
+		for _, entry := range incoming {
+			if entry.ID == nil {
+				continue
+			}
+			resps = append(resps, map[string]any{
+				"jsonrpc": "2.0",
+				"id":      entry.ID,
+				"result":  entry.Params,
+			})
+		}
+
+		data, err := json.Marshal(resps)
+		if err != nil {
+			peerErr <- err
+			return
+		}
+
+		_, err = p.Write(data)
+		peerErr <- err
+	}()
+
+	calls := []jsonrpc2.BatchCall{
+		{Method: "echo", Params: 1},
+		{Method: "ping", Notify: true},
+		{Method: "echo", Params: 3},
+	}
+
+	responses, err := conn.Batch(t.Context(), calls)
+	require.NoError(t, err)
+	require.Len(t, responses, 3)
+	assert.NotNil(t, responses[0])
+	assert.Nil(t, responses[1]) // notification entry
+	assert.NotNil(t, responses[2])
+
+	var v0, v2 int
+	require.NoError(t, responses[0].Result(&v0))
+	require.NoError(t, responses[2].Result(&v2))
+	assert.Equal(t, 1, v0)
+	assert.Equal(t, 3, v2)
+
+	require.NoError(t, <-peerErr)
+}
+
+func TestConn_Batch_Client_Empty(t *testing.T) {
+	t.Parallel()
+
+	conn, _ := getTestConn(t, assertNotCalledHandler(t))
+	defer conn.Close(t.Context())
+
+	responses, err := conn.Batch(t.Context(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, responses)
+}
+
 func TestConn_Batch_InvalidElement(t *testing.T) {
 	t.Parallel()
 
