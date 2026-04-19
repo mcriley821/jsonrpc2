@@ -13,17 +13,27 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Test with coverage
         run: go test -timeout 2s -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage
+          path: coverage.out
+
+      - name: PR coverage comment
+        if: github.event_name == 'pull_request'
+        uses: fgrosse/go-coverage-report@v1.3.0
+        with:
+          coverage-file-name: coverage.out
 
       - name: Compute total coverage
         id: cov
@@ -41,97 +51,6 @@ jobs:
             else print \"red\"
           }")
           printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$COLOR" > /tmp/coverage.json
-
-      - name: Post PR coverage comment
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_REF: ${{ github.base_ref }}
-          PR_PCT: ${{ steps.cov.outputs.pct }}
-        run: |
-          # Get base branch coverage via a temporary worktree
-          git worktree add /tmp/base "origin/$BASE_REF"
-          (cd /tmp/base && go test -timeout 2s -coverprofile=/tmp/base.out ./...) 2>/dev/null || true
-          git worktree remove /tmp/base
-
-          # Parse per-file coverage from a coverage.out profile.
-          # Outputs "filename.go pct" lines (e.g. "conn.go 87.5").
-          parse_cov() {
-            [ -f "$1" ] || return
-            awk 'NR > 1 {
-              n = split($1, a, "/")
-              file = substr(a[n], 1, index(a[n], ":") - 1)
-              total[file] += $2
-              if ($3 > 0) hit[file] += $2
-            }
-            END {
-              for (f in total)
-                printf "%s %.1f\n", f, total[f] > 0 ? hit[f] / total[f] * 100 : 0
-            }' "$1"
-          }
-
-          parse_cov coverage.out  | sort > /tmp/pr_cov.txt
-          parse_cov /tmp/base.out | sort > /tmp/base_cov.txt
-
-          BASE_TOTAL=$(go tool cover -func=/tmp/base.out 2>/dev/null \
-            | grep ^total | awk '{gsub(/%/, "", $3); printf "%.1f", $3}')
-
-          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD" \
-            | grep '\.go$' | grep -v '_test\.go$' | sed 's|.*/||' | sort -u)
-
-          # delta_str <new> <old>  →  e.g. "+1.2%" / "-0.5%" / "+/-0.0%"
-          delta_str() {
-            awk -v n="$1" -v o="$2" 'BEGIN {
-              d = n - o
-              if (d > 0.05)       printf "+%.1f%%", d
-              else if (d < -0.05) printf "%.1f%%",  d
-              else                print "+/-0.0%"
-            }'
-          }
-
-          {
-            printf '<!-- coverage-report -->\n'
-            printf '## Coverage Report\n\n'
-
-            if [ -n "$CHANGED" ]; then
-              printf '| File | Base | PR | Delta |\n'
-              printf '|:-----|-----:|---:|------:|\n'
-              while IFS= read -r file; do
-                [ -z "$file" ] && continue
-                PR_P=$(awk   -v f="$file" '$1==f{print $2}' /tmp/pr_cov.txt)
-                BASE_P=$(awk -v f="$file" '$1==f{print $2}' /tmp/base_cov.txt)
-                [ -n "$PR_P"   ] && PR_CELL="${PR_P}%"   || PR_CELL="n/a"
-                [ -n "$BASE_P" ] && BASE_CELL="${BASE_P}%" || BASE_CELL="n/a"
-                if [ -n "$PR_P" ] && [ -n "$BASE_P" ]; then
-                  DELTA=$(delta_str "$PR_P" "$BASE_P")
-                else
-                  DELTA="n/a"
-                fi
-                printf '| `%s` | %s | %s | %s |\n' "$file" "$BASE_CELL" "$PR_CELL" "$DELTA"
-              done <<< "$CHANGED"
-              printf '\n'
-            fi
-
-            if [ -n "$BASE_TOTAL" ]; then
-              TOTAL_DELTA=$(delta_str "$PR_PCT" "$BASE_TOTAL")
-              printf '**Total**: %s%% -> %s%% (%s)\n' "$BASE_TOTAL" "$PR_PCT" "$TOTAL_DELTA"
-            else
-              printf '**Total coverage**: %s%%\n' "$PR_PCT"
-            fi
-          } > /tmp/comment.md
-
-          # Post or update the coverage comment (update avoids comment spam on re-runs)
-          EXISTING_ID=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            --jq '[.[] | select(.body | startswith("<!-- coverage-report -->"))][0].id // empty')
-
-          if [ -n "$EXISTING_ID" ]; then
-            jq -n --rawfile body /tmp/comment.md '{body: $body}' \
-              | gh api "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" -X PATCH --input -
-          else
-            jq -n --rawfile body /tmp/comment.md '{body: $body}' \
-              | gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --input -
-          fi
 
       - name: Publish coverage badge
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
