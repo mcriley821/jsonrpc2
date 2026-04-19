@@ -1,5 +1,8 @@
 # jsonrpc2
 
+[![Lint](https://github.com/mcriley821/jsonrpc2/actions/workflows/ci.yml/badge.svg)](https://github.com/mcriley821/jsonrpc2/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/mcriley821/jsonrpc2/badges/coverage.json)](https://github.com/mcriley821/jsonrpc2/actions/workflows/coverage.yml)
+
 A Go library implementing [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over any `io.ReadWriteCloser` (TCP, Unix socket, stdin/stdout, etc.).
 
 ## Installation

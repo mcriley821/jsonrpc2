@@ -1,0 +1,51 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [ master ]
+  push:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test with coverage
+        run: go test -timeout 2s -race -coverprofile=coverage.out ./...
+
+      - name: Generate coverage badge JSON
+        run: |
+          PCT=$(go tool cover -func=coverage.out | grep ^total | awk '{gsub(/%/, "", $3); printf "%.1f", $3}')
+          COLOR=$(awk "BEGIN {
+            pct = $PCT
+            if (pct >= 85) print \"brightgreen\"
+            else if (pct >= 70) print \"yellowgreen\"
+            else if (pct >= 50) print \"yellow\"
+            else print \"red\"
+          }")
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$COLOR" > /tmp/coverage.json
+
+      - name: Publish coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin badges 2>/dev/null || true
+          if git show-ref --verify --quiet refs/remotes/origin/badges; then
+            git checkout -B badges origin/badges
+          else
+            git checkout --orphan badges
+            git rm -rf . --quiet
+          fi
+          cp /tmp/coverage.json coverage.json
+          git add coverage.json
+          git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
+          git push -u origin badges
