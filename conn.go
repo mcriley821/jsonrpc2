@@ -67,7 +67,6 @@ var _ Conn = (*conn)(nil)
 // a -32601 Method not found response and notifications are silently ignored.
 // Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
-	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
 	o := defaultConnOptions()
@@ -217,6 +216,7 @@ func (c *conn) shutdown(err error) {
 		for id := range c.inflight {
 			delete(c.inflight, id)
 		}
+
 		c.mu.Unlock()
 	})
 }

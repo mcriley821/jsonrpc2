@@ -436,7 +436,7 @@ func TestConn_Call_UnblockedOnClose(t *testing.T) {
 	}
 }
 
-func getTestConnDefault(t *testing.T) (jsonrpc2.Conn, net.Conn) {
+func getTestConnDefault(t *testing.T) net.Conn {
 	t.Helper()
 
 	s, p := newTestStream(t)
@@ -450,19 +450,19 @@ func getTestConnDefault(t *testing.T) (jsonrpc2.Conn, net.Conn) {
 
 	t.Cleanup(func() { _ = conn.Close(t.Context()) })
 
-	return conn, p
+	return p
 }
 
 func TestNewConn_NoHandler(t *testing.T) {
 	t.Parallel()
 
-	_, _ = getTestConnDefault(t)
+	_ = getTestConnDefault(t)
 }
 
 func TestNewConn_DefaultHandler_MethodNotFound(t *testing.T) {
 	t.Parallel()
 
-	_, p := getTestConnDefault(t)
+	p := getTestConnDefault(t)
 
 	respCh := make(chan []byte, 1)
 
@@ -491,7 +491,7 @@ func TestNewConn_DefaultHandler_MethodNotFound(t *testing.T) {
 func TestNewConn_DefaultHandler_NotificationIgnored(t *testing.T) {
 	t.Parallel()
 
-	_, p := getTestConnDefault(t)
+	p := getTestConnDefault(t)
 
 	_, err := p.Write([]byte(`{"jsonrpc":"2.0","method":"unknown"}`))
 	require.NoError(t, err)
