@@ -147,6 +147,35 @@ func TestMux_ServeRPC_Fallback_Error(t *testing.T) {
 	assert.ErrorContains(t, err, "fallback handler:")
 }
 
+// TestHandleNotification_RegularRequest_NoReply documents that a method
+// registered with HandleNotification never calls the Replier, even when the
+// peer sends a regular request (non-nil ID). The remote peer will never
+// receive a response.
+func TestHandleNotification_RegularRequest_NoReply(t *testing.T) {
+	t.Parallel()
+
+	mux := jsonrpc2.NewMux()
+	replierCalled := false
+
+	jsonrpc2.HandleNotification(mux, "notify",
+		func(_ context.Context, _ jsonrpc2.Nullable[struct{}], _ jsonrpc2.Conn) error {
+			return nil
+		},
+	)
+
+	reply := jsonrpc2.Replier(func(_ context.Context, _ any) error {
+		replierCalled = true
+
+		return nil
+	})
+
+	req := &stubRequest{id: "1", method: "notify", params: nil}
+	err := mux.ServeRPC(t.Context(), req, reply, nil)
+	require.NoError(t, err)
+	assert.False(t, replierCalled,
+		"HandleNotification discards the Replier; the remote peer will never receive a response")
+}
+
 func TestMux_Fallback_Replace(t *testing.T) {
 	t.Parallel()
 
