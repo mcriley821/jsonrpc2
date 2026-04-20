@@ -134,6 +134,10 @@ func Handle[P, R any](m *Mux, method string, f func(ctx context.Context, params 
 
 // HandleNotification registers a typed notification handler for method on m.
 // Unmarshal errors and [Error] returns are silently discarded.
+//
+// If the peer sends a regular request (non-nil ID) to this method, no reply is
+// ever sent. The caller will block on [Conn.Call] until its context is
+// cancelled or the connection closes.
 func HandleNotification[P any](
 	m *Mux, method string, f func(ctx context.Context, params Nullable[P], conn Conn) error,
 ) {
