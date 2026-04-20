@@ -149,8 +149,8 @@ func TestMux_ServeRPC_Fallback_Error(t *testing.T) {
 
 // TestHandleNotification_RegularRequest_NoReply documents that a method
 // registered with HandleNotification never calls the Replier, even when the
-// peer sends a regular request (non-nil ID). The remote peer will hang waiting
-// for a response that never arrives, until its own timeout or connection close.
+// peer sends a regular request (non-nil ID). The remote peer will never
+// receive a response.
 func TestHandleNotification_RegularRequest_NoReply(t *testing.T) {
 	t.Parallel()
 
@@ -173,7 +173,7 @@ func TestHandleNotification_RegularRequest_NoReply(t *testing.T) {
 	err := mux.ServeRPC(t.Context(), req, reply, nil)
 	require.NoError(t, err)
 	assert.False(t, replierCalled,
-		"HandleNotification discards the Replier; the remote peer hangs waiting for a response that never arrives")
+		"HandleNotification discards the Replier; the remote peer will never receive a response")
 }
 
 func TestMux_Fallback_Replace(t *testing.T) {

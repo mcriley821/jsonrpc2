@@ -136,8 +136,7 @@ func Handle[P, R any](m *Mux, method string, f func(ctx context.Context, params 
 // Unmarshal errors and [Error] returns are silently discarded.
 //
 // If the peer sends a regular request (non-nil ID) to this method, no reply is
-// ever sent. The remote peer will hang waiting for a response that never
-// arrives, until its own timeout or connection close.
+// ever sent. The remote peer will never receive a response.
 func HandleNotification[P any](
 	m *Mux, method string, f func(ctx context.Context, params Nullable[P], conn Conn) error,
 ) {
