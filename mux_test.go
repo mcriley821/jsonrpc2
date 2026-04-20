@@ -172,7 +172,8 @@ func TestHandleNotification_RegularRequest_NoReply(t *testing.T) {
 	req := &stubRequest{id: "1", method: "notify", params: nil}
 	err := mux.ServeRPC(t.Context(), req, reply, nil)
 	require.NoError(t, err)
-	assert.False(t, replierCalled, "HandleNotification must not reply to a non-nil-ID request; the caller hangs until context cancel or connection close")
+	assert.False(t, replierCalled,
+		"HandleNotification discards the Replier; caller hangs on Conn.Call until ctx cancel or conn close")
 }
 
 func TestMux_Fallback_Replace(t *testing.T) {
