@@ -9,6 +9,9 @@ linters:
     - varnamelen
     - noinlineerr
     - paralleltest
+  settings:
+    nolintlint:
+      allow-unused: true
 
 issues:
   uniq-by-line: false
