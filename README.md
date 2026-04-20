@@ -44,7 +44,7 @@ ln, _ := net.Listen("tcp", ":8080")
 for {
     nc, _ := ln.Accept()
     stream := jsonrpc2.NewStream(nc)
-    conn := jsonrpc2.NewConn(ctx, stream, mux)
+    conn := jsonrpc2.NewConn(ctx, stream, jsonrpc2.WithHandler(mux))
     go func() { <-conn.Done() }() // wait for shutdown
 }
 ```
@@ -54,11 +54,8 @@ for {
 ```go
 nc, _ := net.Dial("tcp", "localhost:8080")
 stream := jsonrpc2.NewStream(nc)
-conn := jsonrpc2.NewConn(ctx, stream, jsonrpc2.HandlerFunc(
-    func(_ context.Context, _ jsonrpc2.Request, _ jsonrpc2.Replier, _ jsonrpc2.Conn) error {
-        return nil // no incoming requests expected from server
-    },
-))
+// No WithHandler needed for client-only use — unexpected requests get MethodNotFound.
+conn := jsonrpc2.NewConn(ctx, stream)
 defer conn.Close(ctx)
 
 resp, err := conn.Call(ctx, "add", AddParams{A: 1, B: 2})
@@ -162,7 +159,7 @@ Application-defined codes should be outside the range -32768 to -32000 (reserved
 `conn.Done()` returns a channel that is closed when the connection has fully shut down and all background goroutines have exited. It is safe for multiple goroutines to wait on it. `conn.Err()` returns the terminal error after `Done` closes.
 
 ```go
-conn := jsonrpc2.NewConn(ctx, stream, mux)
+conn := jsonrpc2.NewConn(ctx, stream, jsonrpc2.WithHandler(mux))
 
 go func() {
     <-conn.Done()

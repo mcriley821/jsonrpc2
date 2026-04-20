@@ -35,7 +35,7 @@ func getTestConn(t *testing.T, handler jsonrpc2.Handler) (jsonrpc2.Conn, net.Con
 
 	t.Cleanup(func() { _ = stream.Close() })
 
-	conn := jsonrpc2.NewConn(t.Context(), stream, handler)
+	conn := jsonrpc2.NewConn(t.Context(), stream, jsonrpc2.WithHandler(handler))
 	require.NotNil(t, conn)
 
 	t.Cleanup(func() { _ = conn.Close(t.Context()) })
@@ -434,6 +434,75 @@ func TestConn_Call_UnblockedOnClose(t *testing.T) {
 	case err := <-callDone:
 		require.ErrorIs(t, err, jsonrpc2.ErrClosed)
 	}
+}
+
+func getTestConnDefault(t *testing.T) (jsonrpc2.Conn, net.Conn) {
+	t.Helper()
+
+	s, p := newTestStream(t)
+	stream := jsonrpc2.NewStream(s)
+	require.NotNil(t, stream)
+
+	t.Cleanup(func() { _ = stream.Close() })
+
+	conn := jsonrpc2.NewConn(t.Context(), stream)
+	require.NotNil(t, conn)
+
+	t.Cleanup(func() { _ = conn.Close(t.Context()) })
+
+	return conn, p
+}
+
+func TestNewConn_NoHandler(t *testing.T) {
+	t.Parallel()
+
+	_, _ = getTestConnDefault(t)
+}
+
+func TestNewConn_DefaultHandler_MethodNotFound(t *testing.T) {
+	t.Parallel()
+
+	_, p := getTestConnDefault(t)
+
+	respCh := make(chan []byte, 1)
+
+	go func() {
+		_, err := p.Write([]byte(`{"jsonrpc":"2.0","id":"1","method":"unknown"}`))
+		assert.NoError(t, err)
+
+		var raw json.RawMessage
+
+		err = json.NewDecoder(p).Decode(&raw)
+		assert.NoError(t, err)
+		assert.NotEmpty(t, raw)
+
+		respCh <- []byte(raw)
+	}()
+
+	select {
+	case <-time.After(time.Second):
+		require.FailNow(t, "timeout waiting for default MethodNotFound response")
+	case resp := <-respCh:
+		expected := []byte(`{"jsonrpc":"2.0","id":"1","error":{"code":-32601,"message":"Method not found"}}`)
+		assert.Equal(t, expected, resp)
+	}
+}
+
+func TestNewConn_DefaultHandler_NotificationIgnored(t *testing.T) {
+	t.Parallel()
+
+	_, p := getTestConnDefault(t)
+
+	_, err := p.Write([]byte(`{"jsonrpc":"2.0","method":"unknown"}`))
+	require.NoError(t, err)
+
+	// Verify no response is sent back for a notification.
+	require.NoError(t, p.SetReadDeadline(time.Now().Add(50*time.Millisecond)))
+
+	buf := make([]byte, 1)
+	n, err := p.Read(buf)
+	assert.Zero(t, n)
+	assert.Error(t, err, "expected no response for notification with no handler")
 }
 
 func TestConn_Replier_DoubleReply(t *testing.T) {
