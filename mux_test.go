@@ -3,6 +3,7 @@ package jsonrpc2_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/mcriley821/jsonrpc2"
@@ -126,6 +127,24 @@ func TestMux_ServeRPC_Fallback(t *testing.T) {
 	err := mux.ServeRPC(t.Context(), req, noopReplier, nil)
 	require.NoError(t, err)
 	assert.True(t, called)
+}
+
+func TestMux_ServeRPC_Fallback_Error(t *testing.T) {
+	t.Parallel()
+
+	mux := jsonrpc2.NewMux()
+	sentinelErr := errors.New("fallback failure")
+
+	mux.Fallback(jsonrpc2.HandlerFunc(
+		func(_ context.Context, _ jsonrpc2.Request, _ jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+			return sentinelErr
+		},
+	))
+
+	req := &stubRequest{id: "1", method: "unknown", params: nil}
+	err := mux.ServeRPC(t.Context(), req, noopReplier, nil)
+	require.ErrorIs(t, err, sentinelErr)
+	assert.ErrorContains(t, err, "fallback handler:")
 }
 
 func TestMux_Fallback_Replace(t *testing.T) {
