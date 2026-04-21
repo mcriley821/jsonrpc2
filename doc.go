@@ -4,7 +4,7 @@
 // The returned [Conn] is safe for concurrent use: call [Conn.Call] to send requests,
 // [Conn.Notify] to send notifications, and [Conn.Done] to observe shutdown.
 // Use [WithHandler] to register a [Handler] for incoming requests; without it,
-// requests receive a -32601 Method not found response and notifications are silently ignored.
+// requests receive a [MethodNotFound] error response and notifications are silently ignored.
 //
 // The [Mux] type provides per-method dispatch for both request handlers and notification handlers.
 package jsonrpc2

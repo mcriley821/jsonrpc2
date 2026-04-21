@@ -15,7 +15,7 @@ func defaultConnOptions() connOptions {
 	}
 }
 
-// defaultHandler replies with MethodNotFound for requests; notifications are
+// defaultHandler replies with [MethodNotFound] for requests; notifications are
 // silently ignored because the replier for notifications is a no-op.
 func defaultHandler(ctx context.Context, _ Request, reply Replier, _ Conn) error {
 	return reply(ctx, NewError(MethodNotFound, "Method not found", nil))
@@ -23,7 +23,7 @@ func defaultHandler(ctx context.Context, _ Request, reply Replier, _ Conn) error
 
 // WithHandler sets the [Handler] used to dispatch incoming requests.
 // When no WithHandler option is provided, any incoming request receives a
-// -32601 Method not found response and notifications are silently ignored.
+// [MethodNotFound] error response and notifications are silently ignored.
 func WithHandler(h Handler) Option {
 	return func(o *connOptions) {
 		o.handler = h

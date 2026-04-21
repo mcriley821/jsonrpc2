@@ -19,7 +19,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.5.0
       - name: Format
         run: |
           if [ -n "$(gofmt -l .)" ]; then

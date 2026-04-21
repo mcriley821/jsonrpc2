@@ -64,7 +64,7 @@ var _ Conn = (*conn)(nil)
 // NewConn creates and starts a new [Conn] over stream. The connection runs until
 // the peer closes, the handler returns an error, or ctx is cancelled.
 // Use [WithHandler] to dispatch incoming requests; without it, requests receive
-// a -32601 Method not found response and notifications are silently ignored.
+// a [MethodNotFound] error response and notifications are silently ignored.
 // Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
 	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
