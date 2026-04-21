@@ -483,7 +483,7 @@ func TestNewConn_DefaultHandler_MethodNotFound(t *testing.T) {
 	case <-t.Context().Done():
 		require.FailNow(t, "timeout waiting for default MethodNotFound response")
 	case resp := <-respCh:
-		expected := []byte(`{"jsonrpc":"2.0","id":"1","error":{"code":-32601,"message":"Method not found"}}`)
+		expected := []byte(`{"jsonrpc":"2.0","id":"1","error":{"code":-32601,"message":"Method not implemented"}}`)
 		assert.Equal(t, expected, resp)
 	}
 }

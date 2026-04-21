@@ -62,7 +62,7 @@ type conn struct {
 var _ Conn = (*conn)(nil)
 
 // NewConn creates and starts a new [Conn] over stream. The connection runs until
-// the peer closes, the handler returns an error, or ctx is cancelled.
+// the peer closes, a registered handler returns an error, or ctx is cancelled.
 // Use [WithHandler] to dispatch incoming requests; without it, requests receive
 // a [MethodNotFound] error response and notifications are silently ignored.
 // Use [Conn.Done] to wait for shutdown.
