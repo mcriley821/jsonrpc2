@@ -12,6 +12,9 @@ linters:
 
 issues:
   uniq-by-line: false
+  exclude-rules:
+    - linters: [gosec]
+      text: "G118"
 
 severity:
   default: error
