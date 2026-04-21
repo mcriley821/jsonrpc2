@@ -9,12 +9,13 @@ linters:
     - varnamelen
     - noinlineerr
     - paralleltest
+  settings:
+    gosec:
+      excludes:
+        - G118
 
 issues:
   uniq-by-line: false
-  exclude-rules:
-    - linters: [gosec]
-      text: "G118"
 
 severity:
   default: error
