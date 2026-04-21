@@ -67,6 +67,7 @@ var _ Conn = (*conn)(nil)
 // a [MethodNotFound] error response and notifications are silently ignored.
 // Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
+	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
 	o := defaultConnOptions()
