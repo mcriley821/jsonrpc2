@@ -27,7 +27,7 @@ func getTestResp(t *testing.T, result any) jsonrpc2.Response {
 	stream := jsonrpc2.NewStream(s)
 	require.NotNil(t, stream)
 
-	conn := jsonrpc2.NewConn(t.Context(), stream, handler)
+	conn := jsonrpc2.NewConn(t.Context(), stream, jsonrpc2.WithHandler(handler))
 	require.NotNil(t, conn)
 	t.Cleanup(func() { _ = conn.Close(t.Context()) })
 

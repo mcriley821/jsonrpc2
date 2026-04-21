@@ -61,10 +61,12 @@ type conn struct {
 
 var _ Conn = (*conn)(nil)
 
-// NewConn creates and starts a new [Conn] over stream that uses handler to dispatch
-// incoming requests. The connection runs until the peer closes, the handler returns
-// an error, or ctx is cancelled. Use [Conn.Done] to wait for shutdown.
-func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option) Conn {
+// NewConn creates and starts a new [Conn] over stream. The connection runs until
+// the peer closes, a registered handler returns an error, or ctx is cancelled.
+// Use [WithHandler] to dispatch incoming requests; without it, requests receive
+// a [MethodNotFound] error response and notifications are silently ignored.
+// Use [Conn.Done] to wait for shutdown.
+func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
 	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -76,7 +78,7 @@ func NewConn(ctx context.Context, stream Stream, handler Handler, opts ...Option
 	c := &conn{
 		cancel:         cancel,
 		stream:         stream,
-		handler:        handler,
+		handler:        o.handler,
 		outgoing:       make(chan any),
 		done:           make(chan struct{}),
 		shutdownOnce:   sync.Once{},
@@ -215,6 +217,7 @@ func (c *conn) shutdown(err error) {
 		for id := range c.inflight {
 			delete(c.inflight, id)
 		}
+
 		c.mu.Unlock()
 	})
 }
