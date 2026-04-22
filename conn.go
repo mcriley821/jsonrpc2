@@ -432,53 +432,41 @@ func (c *conn) write(ctx context.Context, errChan chan<- error) {
 func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch bool) {
 	defer c.wg.Done()
 
-	sink := make(chan any)
-	done := make(chan struct{})
+	sink := make(chan any, len(requests))
 
-	go func() {
-		out := make([]any, 0, len(requests))
-
-		defer func() { done <- struct{}{} }()
-
-		for resp := range sink {
-			out = append(out, resp)
-		}
-
-		if len(out) == 0 {
-			return
-		}
-
-		if isBatch {
-			select {
-			case <-c.Done():
-			case c.outgoing <- out:
-			}
-		} else {
-			select {
-			case <-c.Done():
-			case c.outgoing <- out[0]:
-			}
-		}
-	}()
-
-	wg := sync.WaitGroup{}
+	var wg sync.WaitGroup
 
 	for _, req := range requests {
-		wg.Add(1)
-
-		go func(r *request) {
-			defer wg.Done()
-
-			replier := c.replier(r.ID(), sink)
-			if err := c.handler.ServeRPC(ctx, r, replier, c); err != nil {
+		wg.Go(func() {
+			if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID(), sink), c); err != nil {
 				c.shutdown(fmt.Errorf("handler error: %w", err))
 			}
-		}(req)
+		})
 	}
 
 	wg.Wait()
 	close(sink)
-	<-done
+
+	out := make([]any, 0, len(requests))
+	for resp := range sink {
+		out = append(out, resp)
+	}
+
+	if len(out) == 0 {
+		return
+	}
+
+	var msg any
+	if isBatch {
+		msg = out
+	} else {
+		msg = out[0]
+	}
+
+	select {
+	case <-c.Done():
+	case c.outgoing <- msg:
+	}
 }
 
 // handleResponses routes an incoming responses to the waiting [Conn.Call]
