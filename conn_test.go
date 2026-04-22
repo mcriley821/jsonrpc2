@@ -543,3 +543,23 @@ func TestConn_Replier_DoubleReply(t *testing.T) {
 		require.ErrorIs(t, err, jsonrpc2.ErrReplied, "second reply should return ErrReplied")
 	}
 }
+
+func TestConn_BatchRequest_Handling(t *testing.T) {
+	t.Parallel()
+
+	handler := func(ctx context.Context, req jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+		return reply(ctx, req.Params())
+	}
+
+	_, p := (t, jsonrpc2.HandlerFunc(handler))
+
+	t.Run("empty batch is invalid", func(t *testing.T) {
+		_, err := p.Write([]byte()`[]`))
+		require.NoError(t, err)
+
+		var resp json.RawMessage
+		require.NoError(t, json.NewDecoder(p).Decode(&resp))
+
+
+	})
+}

@@ -3,7 +3,9 @@ package jsonrpc2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 
@@ -106,7 +108,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 
 	respCh := make(chan *response, 1)
 
-	if err := c.registerRequest(id, respCh); err != nil {
+	if err := c.registerRequest(map[string]chan *response{id: respCh}); err != nil {
 		return nil, err
 	}
 
@@ -187,10 +189,10 @@ func (c *conn) Err() error {
 	}
 }
 
-// registerRequest registers ch under id in the inflight map. It holds mu for
-// the duration so that the closed check and the map insertion are a single
+// registerRequests registers requests in the inflight map. It holds mu for
+// the duration so that the closed check and the map insertions are a single
 // critical section, eliminating the TOCTOU window against shutdown.
-func (c *conn) registerRequest(id string, ch chan *response) error {
+func (c *conn) registerRequest(reqs map[string]chan *response) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -198,7 +200,7 @@ func (c *conn) registerRequest(id string, ch chan *response) error {
 		return c.termErr
 	}
 
-	c.inflight[id] = ch
+	maps.Copy(c.inflight, reqs)
 
 	return nil
 }
@@ -275,23 +277,65 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 				return
 			}
 
-			var v partialMessage
-			if err := json.Unmarshal(raw, &v); err != nil {
+			var (
+				messages []partialMessage
+				err      error
+				isBatch  = false
+			)
+
+			if len(raw) > 0 && raw[0] == '[' {
+				isBatch = true
+				err = json.Unmarshal(raw, &messages)
+			} else {
+				messages = append(messages, partialMessage{})
+				err = json.Unmarshal(raw, &messages[0])
+			}
+
+			if err != nil {
 				errChan <- fmt.Errorf("message unmarshal: %w", err)
 
 				return
 			}
 
-			if v.JSONRPC != "2.0" {
-				errChan <- fmt.Errorf(`unsupported jsonrpc ("2.0" != %s)`, v.JSONRPC)
+			isResponse := messages[0].Method == ""
 
-				return
+			for _, message := range messages {
+				if message.JSONRPC != "2.0" {
+					errChan <- fmt.Errorf(`unsupported jsonrpc ("2.0" != %s)`, message.JSONRPC)
+
+					return
+				}
+
+				if isBatch {
+					var err error
+					if isResponse && message.Method != "" {
+						err = errors.New("request in response batch")
+					} else if !isResponse && message.Method == "" {
+						err = errors.New("response in request batch")
+					}
+
+					if err != nil {
+						errChan <- fmt.Errorf("invalid batch: %w", err)
+
+						return
+					}
+				}
 			}
 
-			if v.Method == "" {
-				resp := new(response)
+			if isResponse {
+				var (
+					responses []*response
+					err       error
+				)
 
-				if err := json.Unmarshal(raw, &resp); err != nil {
+				if isBatch {
+					err = json.Unmarshal(raw, &responses)
+				} else {
+					responses = append(responses, new(response))
+					err = json.Unmarshal(raw, &responses[0])
+				}
+
+				if err != nil {
 					errChan <- fmt.Errorf("response unmarshal: %w", err)
 
 					return
@@ -299,11 +343,21 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 
 				c.wg.Add(1)
 
-				go c.handleResponse(ctx, resp)
+				go c.handleResponses(ctx, responses)
 			} else {
-				req := new(request)
+				var (
+					requests []*request
+					err      error
+				)
 
-				if err := json.Unmarshal(raw, &req); err != nil {
+				if isBatch {
+					err = json.Unmarshal(raw, &requests)
+				} else {
+					requests = append(requests, new(request))
+					err = json.Unmarshal(raw, &requests[0])
+				}
+
+				if err != nil {
 					errChan <- fmt.Errorf("request unmarshal: %w", err)
 
 					return
@@ -311,7 +365,7 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 
 				c.wg.Add(1)
 
-				go c.handleRequest(ctx, req)
+				go c.handleRequests(ctx, requests)
 			}
 		}
 	}
@@ -337,39 +391,75 @@ func (c *conn) write(ctx context.Context, errChan chan<- error) {
 	}
 }
 
-// handleRequest invokes the handler for the incoming request.
+// handleRequests invokes the handler for the incoming requests.
 // If the handler returns an error, the connection is closed.
-func (c *conn) handleRequest(ctx context.Context, req *request) {
+func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch bool) {
 	defer c.wg.Done()
 
-	if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID()), c); err != nil {
-		c.shutdown(fmt.Errorf("handler error: %w", err))
+	var (
+		sink  chan any
+		errCh chan error
+		done  chan struct{}
+	)
+
+	go func() {
+		out := make([]any, 0, len(requests))
+		defer func() { done <- struct{}{} }()
+
+		for range len(requests) {
+			select {
+			case err := <-errCh:
+				c.shutdown(fmt.Errorf("handler error: %w", err))
+			case resp := <-sink:
+				out = append(out, resp)
+			}
+		}
+
+		if isBatch {
+			c.outgoing <- out
+		} else {
+			c.outgoing <- out[0]
+		}
+	}()
+
+	for _, req := range requests {
+		go func(r *request) {
+			replier := c.replier(r.ID(), sink)
+			if err := c.handler.ServeRPC(ctx, r, replier, c); err != nil {
+				errCh <- err
+			}
+		}(req)
 	}
+
+	<-done
 }
 
-// handleResponse routes an incoming response to the waiting [Conn.Call] goroutine.
+// handleResponses routes an incoming responses to the waiting [Conn.Call]
+// or [Conn.Batch] goroutine.
 // Unknown IDs and non-string IDs are silently dropped.
-func (c *conn) handleResponse(ctx context.Context, resp *response) {
+func (c *conn) handleResponses(ctx context.Context, responses []*response) {
 	defer c.wg.Done()
 
-	id, ok := resp.ID().(string)
-	if !ok {
-		return
-	}
-
-	// Delete under the write lock so only one goroutine can claim the channel.
-	// A duplicate response arriving concurrently will find the entry already
-	// gone and return without sending. Call's deferred delete becomes a no-op.
-	c.mu.Lock()
-	ch, ok := c.inflight[id]
-	delete(c.inflight, id)
-	c.mu.Unlock()
-
-	if ok {
-		select {
-		case <-ctx.Done():
+	for _, resp := range responses {
+		id, ok := resp.ID().(string)
+		if !ok {
 			return
-		case ch <- resp:
+		}
+
+		// Delete under the write lock so only one goroutine can claim the channel.
+		// A duplicate response arriving concurrently will find the entry already
+		// gone and return without sending. Call's deferred delete becomes a no-op.
+		c.mu.Lock()
+		ch, ok := c.inflight[id]
+		delete(c.inflight, id)
+		c.mu.Unlock()
+
+		if ok {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- resp:
+			}
 		}
 	}
 }
@@ -377,7 +467,7 @@ func (c *conn) handleResponse(ctx context.Context, resp *response) {
 // replier returns a [Replier] bound to the request ID.
 // Notifications (id == nil) return a no-op.
 // The returned Replier returns [ErrReplied] on any call after the first.
-func (c *conn) replier(id any) Replier {
+func (c *conn) replier(id any, sink chan<- any) Replier {
 	if id == nil {
 		return func(context.Context, any) error { return nil }
 	}
@@ -404,7 +494,7 @@ func (c *conn) replier(id any) Replier {
 			return ctx.Err()
 		case <-c.done:
 			return ErrClosed
-		case c.outgoing <- resp:
+		case sink <- resp:
 			return nil
 		}
 	}
