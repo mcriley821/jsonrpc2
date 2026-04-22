@@ -544,16 +544,16 @@ func TestConn_Replier_DoubleReply(t *testing.T) {
 	}
 }
 
-func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel
+func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
 	t.Parallel()
 
 	handler := func(ctx context.Context, req jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
 		return reply(ctx, req.Params())
 	}
 
-	_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
-
 	t.Run("empty batch produces no response", func(t *testing.T) {
+		_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
+
 		_, err := p.Write([]byte(`[]`))
 		require.NoError(t, err)
 
@@ -564,5 +564,58 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel
 		n, err := p.Read(buf)
 		assert.Zero(t, n)
 		assert.Error(t, err, "expected no response for empty batch")
+	})
+
+	t.Run("notifications-only batch produces no response", func(t *testing.T) {
+		_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
+
+		_, err := p.Write([]byte(`[
+			{"jsonrpc":"2.0","method":"foo"},
+			{"jsonrpc":"2.0","method":"bar"}
+		]`))
+		require.NoError(t, err)
+
+		require.NoError(t, p.SetReadDeadline(time.Now().Add(50*time.Millisecond)))
+
+		buf := make([]byte, 1)
+		n, err := p.Read(buf)
+		assert.Zero(t, n)
+		assert.Error(t, err, "expected no response for notifications-only batch")
+	})
+
+	t.Run("request in response batch closes connection", func(t *testing.T) {
+		conn, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
+
+		_, err := p.Write([]byte(`[
+			{"jsonrpc":"2.0","id":"1","result":"ok"},
+			{"jsonrpc":"2.0","id":"2","method":"foo"}
+		]`))
+		require.NoError(t, err)
+
+		select {
+		case <-t.Context().Done():
+			require.FailNow(t, "conn did not shut down after mixed batch")
+		case <-conn.Done():
+		}
+
+		assert.Error(t, conn.Err())
+	})
+
+	t.Run("response in request batch closes connection", func(t *testing.T) {
+		conn, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
+
+		_, err := p.Write([]byte(`[
+			{"jsonrpc":"2.0","id":"1","method":"foo"},
+			{"jsonrpc":"2.0","id":"2","result":"ok"}
+		]`))
+		require.NoError(t, err)
+
+		select {
+		case <-t.Context().Done():
+			require.FailNow(t, "conn did not shut down after mixed batch")
+		case <-conn.Done():
+		}
+
+		assert.Error(t, conn.Err())
 	})
 }
