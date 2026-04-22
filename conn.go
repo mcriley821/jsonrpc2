@@ -1,6 +1,7 @@
 package jsonrpc2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -69,7 +70,7 @@ var _ Conn = (*conn)(nil)
 // a [MethodNotFound] error response and notifications are silently ignored.
 // Use [Conn.Done] to wait for shutdown.
 func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
-	//nolint:gosec // G118: cancel stored in conn struct, called during shutdown
+	//nolint:gosec,nolintlint // G118: cancel stored in conn struct, called during shutdown
 	ctx, cancel := context.WithCancel(ctx)
 
 	o := defaultConnOptions()
@@ -253,21 +254,129 @@ func (c *conn) run(ctx context.Context) {
 
 // partialMessage classifies an incoming message without full deserialization.
 // Method distinguishes requests from responses.
-// firstNonSpace returns the first non-whitespace byte in b, or 0 if b is
-// empty or all whitespace. Used to detect batch messages without allocating.
-func firstNonSpace(b []byte) byte {
-	for _, c := range b {
-		if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
-			return c
-		}
-	}
-
-	return 0
-}
-
 type partialMessage struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
+}
+
+// classifyRaw detects whether raw is a batch (JSON array) and partially
+// parses each element to extract jsonrpc and method fields.
+func classifyRaw(raw json.RawMessage) ([]partialMessage, bool, error) {
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	isBatch := len(trimmed) > 0 && trimmed[0] == '['
+
+	var messages []partialMessage
+
+	if isBatch {
+		if err := json.Unmarshal(raw, &messages); err != nil {
+			return nil, false, fmt.Errorf("message unmarshal: %w", err)
+		}
+	} else {
+		var m partialMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, false, fmt.Errorf("message unmarshal: %w", err)
+		}
+
+		messages = []partialMessage{m}
+	}
+
+	return messages, isBatch, nil
+}
+
+// validateMessages checks that every message has jsonrpc "2.0" and that a
+// batch does not mix requests and responses.
+func validateMessages(messages []partialMessage, isBatch bool) error {
+	isResponse := messages[0].Method == ""
+
+	for _, m := range messages {
+		if m.JSONRPC != "2.0" {
+			return fmt.Errorf(`unsupported jsonrpc ("2.0" != %s)`, m.JSONRPC)
+		}
+
+		if !isBatch {
+			continue
+		}
+
+		if isResponse && m.Method != "" {
+			return errors.New("invalid batch: request in response batch")
+		}
+
+		if !isResponse && m.Method == "" {
+			return errors.New("invalid batch: response in request batch")
+		}
+	}
+
+	return nil
+}
+
+// dispatchResponses unmarshals raw into responses and launches handleResponses.
+func (c *conn) dispatchResponses(ctx context.Context, raw json.RawMessage, isBatch bool) error {
+	var responses []*response
+
+	if isBatch {
+		if err := json.Unmarshal(raw, &responses); err != nil {
+			return fmt.Errorf("response unmarshal: %w", err)
+		}
+	} else {
+		r := new(response)
+		if err := json.Unmarshal(raw, r); err != nil {
+			return fmt.Errorf("response unmarshal: %w", err)
+		}
+
+		responses = []*response{r}
+	}
+
+	c.wg.Add(1)
+
+	go c.handleResponses(ctx, responses)
+
+	return nil
+}
+
+// dispatchRequests unmarshals raw into requests and launches handleRequests.
+func (c *conn) dispatchRequests(ctx context.Context, raw json.RawMessage, isBatch bool) error {
+	var requests []*request
+
+	if isBatch {
+		if err := json.Unmarshal(raw, &requests); err != nil {
+			return fmt.Errorf("request unmarshal: %w", err)
+		}
+	} else {
+		r := new(request)
+		if err := json.Unmarshal(raw, r); err != nil {
+			return fmt.Errorf("request unmarshal: %w", err)
+		}
+
+		requests = []*request{r}
+	}
+
+	c.wg.Add(1)
+
+	go c.handleRequests(ctx, requests, isBatch)
+
+	return nil
+}
+
+// dispatchRaw classifies, validates, and dispatches a single raw message.
+func (c *conn) dispatchRaw(ctx context.Context, raw json.RawMessage) error {
+	messages, isBatch, err := classifyRaw(raw)
+	if err != nil {
+		return err
+	}
+
+	if len(messages) == 0 {
+		return nil
+	}
+
+	if err := validateMessages(messages, isBatch); err != nil {
+		return err
+	}
+
+	if messages[0].Method == "" {
+		return c.dispatchResponses(ctx, raw, isBatch)
+	}
+
+	return c.dispatchRequests(ctx, raw, isBatch)
 }
 
 // read dispatches incoming messages until ctx is cancelled or an error occurs.
@@ -289,99 +398,10 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 				return
 			}
 
-			var (
-				messages []partialMessage
-				err      error
-				isBatch  = false
-			)
-
-			if firstNonSpace(raw) == '[' {
-				isBatch = true
-				err = json.Unmarshal(raw, &messages)
-			} else {
-				messages = append(messages, partialMessage{})
-				err = json.Unmarshal(raw, &messages[0])
-			}
-
-			if err != nil {
-				errChan <- fmt.Errorf("message unmarshal: %w", err)
+			if err := c.dispatchRaw(ctx, raw); err != nil {
+				errChan <- err
 
 				return
-			}
-
-			if len(messages) == 0 {
-				continue
-			}
-
-			isResponse := messages[0].Method == ""
-
-			for _, message := range messages {
-				if message.JSONRPC != "2.0" {
-					errChan <- fmt.Errorf(`unsupported jsonrpc ("2.0" != %s)`, message.JSONRPC)
-
-					return
-				}
-
-				if isBatch {
-					var err error
-					if isResponse && message.Method != "" {
-						err = errors.New("request in response batch")
-					} else if !isResponse && message.Method == "" {
-						err = errors.New("response in request batch")
-					}
-
-					if err != nil {
-						errChan <- fmt.Errorf("invalid batch: %w", err)
-
-						return
-					}
-				}
-			}
-
-			if isResponse {
-				var (
-					responses []*response
-					err       error
-				)
-
-				if isBatch {
-					err = json.Unmarshal(raw, &responses)
-				} else {
-					responses = append(responses, new(response))
-					err = json.Unmarshal(raw, &responses[0])
-				}
-
-				if err != nil {
-					errChan <- fmt.Errorf("response unmarshal: %w", err)
-
-					return
-				}
-
-				c.wg.Add(1)
-
-				go c.handleResponses(ctx, responses)
-			} else {
-				var (
-					requests []*request
-					err      error
-				)
-
-				if isBatch {
-					err = json.Unmarshal(raw, &requests)
-				} else {
-					requests = append(requests, new(request))
-					err = json.Unmarshal(raw, &requests[0])
-				}
-
-				if err != nil {
-					errChan <- fmt.Errorf("request unmarshal: %w", err)
-
-					return
-				}
-
-				c.wg.Add(1)
-
-				go c.handleRequests(ctx, requests, isBatch)
 			}
 		}
 	}
