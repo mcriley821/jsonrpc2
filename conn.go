@@ -253,6 +253,18 @@ func (c *conn) run(ctx context.Context) {
 
 // partialMessage classifies an incoming message without full deserialization.
 // Method distinguishes requests from responses.
+// firstNonSpace returns the first non-whitespace byte in b, or 0 if b is
+// empty or all whitespace. Used to detect batch messages without allocating.
+func firstNonSpace(b []byte) byte {
+	for _, c := range b {
+		if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+			return c
+		}
+	}
+
+	return 0
+}
+
 type partialMessage struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
@@ -283,7 +295,7 @@ func (c *conn) read(ctx context.Context, errChan chan<- error) {
 				isBatch  = false
 			)
 
-			if len(raw) > 0 && raw[0] == '[' {
+			if firstNonSpace(raw) == '[' {
 				isBatch = true
 				err = json.Unmarshal(raw, &messages)
 			} else {

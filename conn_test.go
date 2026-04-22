@@ -553,11 +553,16 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel
 
 	_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
 
-	t.Run("empty batch is invalid", func(t *testing.T) {
+	t.Run("empty batch produces no response", func(t *testing.T) {
 		_, err := p.Write([]byte(`[]`))
 		require.NoError(t, err)
 
-		var resp json.RawMessage
-		require.NoError(t, json.NewDecoder(p).Decode(&resp))
+		// Server silently ignores an empty batch; no bytes should arrive.
+		require.NoError(t, p.SetReadDeadline(time.Now().Add(50*time.Millisecond)))
+
+		buf := make([]byte, 1)
+		n, err := p.Read(buf)
+		assert.Zero(t, n)
+		assert.Error(t, err, "expected no response for empty batch")
 	})
 }
