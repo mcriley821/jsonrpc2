@@ -20,8 +20,6 @@ go get github.com/mcriley821/jsonrpc2
 | `Handler` | Processes incoming requests. Use `Mux` + `Handle`/`HandleNotification` for typed, per-method dispatch. |
 | `Error`   | A JSON-RPC error object. `NewError` creates one; return it from a handler to send an error response.   |
 
-Standard JSON-RPC 2.0 error codes are exported as constants: `ParseError` (−32700), `InvalidRequest` (−32600), `MethodNotFound` (−32601), `InvalidParams` (−32602), `InternalError` (−32603). Application-defined codes should be outside the range −32768 to −32000.
-
 ## Examples
 
 See [`example_test.go`](./example_test.go) for runnable examples covering the full server-client flow, typed handlers, nullable params, error responses, raw handler registration, and connection lifecycle.
