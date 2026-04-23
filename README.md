@@ -1,5 +1,6 @@
 # jsonrpc2
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Lint](https://github.com/mcriley821/jsonrpc2/actions/workflows/ci.yml/badge.svg)](https://github.com/mcriley821/jsonrpc2/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/github/mcriley821/jsonrpc2/graph/badge.svg?token=TJVCJ0K7HN)](https://codecov.io/github/mcriley821/jsonrpc2)
 
