@@ -68,15 +68,15 @@ func ExampleNewMux() {
 	sc, cc := net.Pipe()
 	server := jsonrpc2.NewConn(ctx, jsonrpc2.NewStream(sc), jsonrpc2.WithHandler(mux))
 	client := jsonrpc2.NewConn(ctx, jsonrpc2.NewStream(cc))
-	defer func() {
-		_ = client.Close(ctx)
-		_ = server.Close(ctx)
-	}()
 
 	resp, err := client.Call(ctx, "add", addParams{A: 1, B: 2})
+	_ = client.Close(ctx)
+	_ = server.Close(ctx)
+
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if resp.Failed() {
 		log.Fatalf("rpc error: %s", resp.Error().Message())
 	}
@@ -85,6 +85,7 @@ func ExampleNewMux() {
 	if err := resp.Result(&result); err != nil {
 		log.Fatal(err)
 	}
+
 	fmt.Println(result.Sum)
 
 	// Output:
@@ -102,6 +103,7 @@ func ExampleHandle_rpcError() {
 			if p.Value.B == 0 {
 				return divResult{}, jsonrpc2.NewError(jsonrpc2.InvalidParams, "division by zero", nil)
 			}
+
 			return divResult{Quotient: p.Value.A / p.Value.B}, nil
 		},
 	)
@@ -109,15 +111,15 @@ func ExampleHandle_rpcError() {
 	sc, cc := net.Pipe()
 	server := jsonrpc2.NewConn(ctx, jsonrpc2.NewStream(sc), jsonrpc2.WithHandler(mux))
 	client := jsonrpc2.NewConn(ctx, jsonrpc2.NewStream(cc))
-	defer func() {
-		_ = client.Close(ctx)
-		_ = server.Close(ctx)
-	}()
 
 	resp, err := client.Call(ctx, "divide", divParams{A: 10, B: 0})
+	_ = client.Close(ctx)
+	_ = server.Close(ctx)
+
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if resp.Failed() {
 		fmt.Printf("error %d: %s\n", resp.Error().Code(), resp.Error().Message())
 	}
@@ -135,10 +137,13 @@ func ExampleHandle_nullable() {
 			if !p.Valid {
 				return greetResult{Greeting: "hello, world"}, nil
 			}
+
 			return greetResult{Greeting: "hello, " + p.Value.Name}, nil
 		},
 	)
 	_ = mux
+
+	// Output:
 }
 
 // ExampleHandleNotification shows how to register a handler for fire-and-forget
@@ -148,10 +153,13 @@ func ExampleHandleNotification() {
 	jsonrpc2.HandleNotification(mux, "log",
 		func(_ context.Context, p jsonrpc2.Nullable[logParams], _ jsonrpc2.Conn) error {
 			slog.Info(p.Value.Message)
+
 			return nil
 		},
 	)
 	_ = mux
+
+	// Output:
 }
 
 // ExampleMux_Handle shows how to register a raw handler that works directly
@@ -164,6 +172,8 @@ func ExampleMux_Handle() {
 		},
 	))
 	_ = mux
+
+	// Output:
 }
 
 // ExampleMux_Fallback shows how to replace the default MethodNotFound response
@@ -176,6 +186,8 @@ func ExampleMux_Fallback() {
 		},
 	))
 	_ = mux
+
+	// Output:
 }
 
 // ExampleConn_Done shows how to wait for a connection to finish shutting down
@@ -188,16 +200,22 @@ func ExampleConn_Done() {
 	conn := jsonrpc2.NewConn(ctx, jsonrpc2.NewStream(sc))
 
 	shutdown := make(chan struct{})
+
 	go func() {
 		defer close(shutdown)
+
 		<-conn.Done()
+
 		if err := conn.Err(); err != nil && !errors.Is(err, jsonrpc2.ErrClosed) {
 			log.Printf("connection error: %v", err)
 		}
 	}()
 
 	_ = conn.Close(ctx)
+
 	<-shutdown
+
+	// Output:
 }
 
 // ExampleConn_Notify shows how a handler can push a notification back to the
@@ -207,8 +225,11 @@ func ExampleConn_Notify() {
 	jsonrpc2.Handle(mux, "subscribe",
 		func(ctx context.Context, _ jsonrpc2.Nullable[subscribeParams], conn jsonrpc2.Conn) (subscribeResult, error) {
 			_ = conn.Notify(ctx, "event", eventParams{Type: "subscribed"})
+
 			return subscribeResult{OK: true}, nil
 		},
 	)
 	_ = mux
+
+	// Output:
 }
