@@ -8,7 +8,6 @@ type Option func(*connOptions)
 // Logger is the interface accepted by [WithLogger].
 // [*slog.Logger] satisfies this interface automatically.
 type Logger interface {
-	Debug(msg string, args ...any)
 	DebugContext(ctx context.Context, msg string, args ...any)
 }
 

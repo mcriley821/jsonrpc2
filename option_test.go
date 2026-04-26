@@ -6,7 +6,6 @@ import (
 	"net"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/mcriley821/jsonrpc2"
 	"github.com/stretchr/testify/assert"
@@ -18,14 +17,10 @@ type spyLogger struct {
 	entries []string
 }
 
-func (s *spyLogger) Debug(msg string, _ ...any) {
+func (s *spyLogger) DebugContext(_ context.Context, msg string, _ ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries = append(s.entries, msg)
-}
-
-func (s *spyLogger) DebugContext(_ context.Context, msg string, _ ...any) {
-	s.Debug(msg)
 }
 
 func (s *spyLogger) messages() []string {
@@ -36,7 +31,7 @@ func (s *spyLogger) messages() []string {
 	return out
 }
 
-func getTestConnLogger(t *testing.T, handler jsonrpc2.Handler, logger jsonrpc2.Logger) (jsonrpc2.Conn, net.Conn) {
+func getTestConnWithLogger(t *testing.T, handler jsonrpc2.Handler, logger jsonrpc2.Logger) (jsonrpc2.Conn, net.Conn) {
 	t.Helper()
 
 	s, p := newTestStream(t)
@@ -58,7 +53,7 @@ func TestWithLogger_CallLogsRequestSentAndResponseReceived(t *testing.T) {
 	t.Parallel()
 
 	spy := &spyLogger{}
-	conn, p := getTestConnLogger(t, assertNotCalledHandler(t), spy)
+	conn, p := getTestConnWithLogger(t, assertNotCalledHandler(t), spy)
 
 	idCh := make(chan any, 1)
 	errCh := make(chan error, 1)
@@ -82,7 +77,7 @@ func TestWithLogger_NotifyLogsNotificationSent(t *testing.T) {
 	t.Parallel()
 
 	spy := &spyLogger{}
-	conn, p := getTestConnLogger(t, assertNotCalledHandler(t), spy)
+	conn, p := getTestConnWithLogger(t, assertNotCalledHandler(t), spy)
 
 	notifCh := make(chan []byte, 1)
 	errCh := make(chan error, 1)
@@ -111,7 +106,7 @@ func TestWithLogger_ServerSideLogsRequestReceivedAndResponseSent(t *testing.T) {
 	})
 
 	spy := &spyLogger{}
-	_, p := getTestConnLogger(t, handler, spy)
+	_, p := getTestConnWithLogger(t, handler, spy)
 
 	_, err := p.Write([]byte(`{"jsonrpc":"2.0","id":"1","method":"doSomething"}`))
 	require.NoError(t, err)
@@ -121,7 +116,7 @@ func TestWithLogger_ServerSideLogsRequestReceivedAndResponseSent(t *testing.T) {
 	require.NoError(t, json.NewDecoder(p).Decode(&raw))
 
 	select {
-	case <-time.After(time.Second):
+	case <-t.Context().Done():
 		require.FailNow(t, "handler did not complete")
 	case <-handlerDone:
 	}
