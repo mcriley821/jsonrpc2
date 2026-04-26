@@ -19,6 +19,7 @@ type connOptions struct {
 func defaultConnOptions() connOptions {
 	return connOptions{
 		handler: HandlerFunc(defaultHandler),
+		logger:  nil,
 	}
 }
 

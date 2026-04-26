@@ -20,14 +20,17 @@ type spyLogger struct {
 func (s *spyLogger) DebugContext(_ context.Context, msg string, _ ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.entries = append(s.entries, msg)
 }
 
 func (s *spyLogger) messages() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	out := make([]string, len(s.entries))
 	copy(out, s.entries)
+
 	return out
 }
 
@@ -52,10 +55,11 @@ func getTestConnWithLogger(t *testing.T, handler jsonrpc2.Handler, logger jsonrp
 func TestWithLogger_CallLogsRequestSentAndResponseReceived(t *testing.T) {
 	t.Parallel()
 
-	spy := &spyLogger{}
+	spy := &spyLogger{mu: sync.Mutex{}, entries: nil}
 	conn, p := getTestConnWithLogger(t, assertNotCalledHandler(t), spy)
 
 	idCh := make(chan any, 1)
+
 	errCh := make(chan error, 1)
 	go pipeRespond(t, p, idCh, errCh, nil)
 
@@ -76,10 +80,11 @@ func TestWithLogger_CallLogsRequestSentAndResponseReceived(t *testing.T) {
 func TestWithLogger_NotifyLogsNotificationSent(t *testing.T) {
 	t.Parallel()
 
-	spy := &spyLogger{}
+	spy := &spyLogger{mu: sync.Mutex{}, entries: nil}
 	conn, p := getTestConnWithLogger(t, assertNotCalledHandler(t), spy)
 
 	notifCh := make(chan []byte, 1)
+
 	errCh := make(chan error, 1)
 	go pipeNotif(t, p, notifCh, errCh)
 
@@ -100,18 +105,21 @@ func TestWithLogger_ServerSideLogsRequestReceivedAndResponseSent(t *testing.T) {
 
 	handlerDone := make(chan struct{})
 
-	handler := jsonrpc2.HandlerFunc(func(ctx context.Context, _ jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
-		defer close(handlerDone)
-		return reply(ctx, "ok")
-	})
+	handler := jsonrpc2.HandlerFunc(
+		func(ctx context.Context, _ jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+			defer close(handlerDone)
 
-	spy := &spyLogger{}
+			return reply(ctx, "ok")
+		},
+	)
+
+	spy := &spyLogger{mu: sync.Mutex{}, entries: nil}
+
 	_, p := getTestConnWithLogger(t, handler, spy)
 
 	_, err := p.Write([]byte(`{"jsonrpc":"2.0","id":"1","method":"doSomething"}`))
 	require.NoError(t, err)
 
-	// drain the response
 	var raw json.RawMessage
 	require.NoError(t, json.NewDecoder(p).Decode(&raw))
 
@@ -132,6 +140,7 @@ func TestWithLogger_NilLogger_NoPanic(t *testing.T) {
 	conn, p := getTestConn(t, assertNotCalledHandler(t))
 
 	idCh := make(chan any, 1)
+
 	errCh := make(chan error, 1)
 	go pipeRespond(t, p, idCh, errCh, nil)
 

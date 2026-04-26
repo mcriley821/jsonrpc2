@@ -100,13 +100,6 @@ func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
 	return c
 }
 
-// log emits a Debug log entry if a logger is configured.
-func (c *conn) log(ctx context.Context, msg string, args ...any) {
-	if c.logger != nil {
-		c.logger.DebugContext(ctx, msg, args...)
-	}
-}
-
 // Call sends a request and waits for a response. Pass nil for params to omit the field.
 func (c *conn) Call(ctx context.Context, method string, params any) (Response, error) {
 	id := uuid.NewString()
@@ -144,6 +137,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 		return nil, c.termErr
 	case resp := <-respCh:
 		c.log(ctx, "response received", "id", id, "failed", resp.Failed())
+
 		return resp, nil
 	}
 }
@@ -168,6 +162,7 @@ func (c *conn) Notify(ctx context.Context, method string, params any) error {
 		return c.termErr
 	case c.outgoing <- req:
 		c.log(ctx, "notification sent", "method", method)
+
 		return nil
 	}
 }
@@ -199,6 +194,13 @@ func (c *conn) Err() error {
 		return c.termErr
 	default:
 		return nil
+	}
+}
+
+// log emits a Debug log entry if a logger is configured.
+func (c *conn) log(ctx context.Context, msg string, args ...any) {
+	if c.logger != nil {
+		c.logger.DebugContext(ctx, msg, args...)
 	}
 }
 
@@ -451,6 +453,7 @@ func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch 
 	for _, req := range requests {
 		wg.Go(func() {
 			c.log(ctx, "request received", "method", req.Method(), "id", req.ID())
+
 			if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID(), sink), c); err != nil {
 				c.shutdown(fmt.Errorf("handler error: %w", err))
 			}
