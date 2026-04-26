@@ -5,13 +5,21 @@ import "context"
 // Option configures a [Conn] created by [NewConn].
 type Option func(*connOptions)
 
+// Logger is the interface accepted by [WithLogger].
+// [*slog.Logger] satisfies this interface automatically.
+type Logger interface {
+	DebugContext(ctx context.Context, msg string, args ...any)
+}
+
 type connOptions struct {
 	handler Handler
+	logger  Logger
 }
 
 func defaultConnOptions() connOptions {
 	return connOptions{
 		handler: HandlerFunc(defaultHandler),
+		logger:  nil,
 	}
 }
 
@@ -27,5 +35,16 @@ func defaultHandler(ctx context.Context, _ Request, reply Replier, _ Conn) error
 func WithHandler(h Handler) Option {
 	return func(o *connOptions) {
 		o.handler = h
+	}
+}
+
+// WithLogger sets the [Logger] used to trace the request/response lifecycle.
+// Log entries are emitted at Debug level for outgoing requests and
+// notifications, incoming requests, outgoing responses, and incoming
+// responses. When no WithLogger option is provided, logging is disabled.
+// [*slog.Logger] satisfies [Logger] without an adapter.
+func WithLogger(l Logger) Option {
+	return func(o *connOptions) {
+		o.logger = l
 	}
 }
