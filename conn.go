@@ -44,6 +44,7 @@ type conn struct {
 
 	stream  Stream
 	handler Handler
+	logger  Logger
 
 	outgoing chan any
 	done     chan struct{}
@@ -82,6 +83,7 @@ func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
 		cancel:         cancel,
 		stream:         stream,
 		handler:        o.handler,
+		logger:         o.logger,
 		outgoing:       make(chan any),
 		done:           make(chan struct{}),
 		shutdownOnce:   sync.Once{},
@@ -96,6 +98,13 @@ func NewConn(ctx context.Context, stream Stream, opts ...Option) Conn {
 	go c.run(ctx)
 
 	return c
+}
+
+// log emits a Debug log entry if a logger is configured.
+func (c *conn) log(ctx context.Context, msg string, args ...any) {
+	if c.logger != nil {
+		c.logger.DebugContext(ctx, msg, args...)
+	}
 }
 
 // Call sends a request and waits for a response. Pass nil for params to omit the field.
@@ -125,6 +134,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 	case <-c.done:
 		return nil, c.termErr
 	case c.outgoing <- req:
+		c.log(ctx, "request sent", "method", method, "id", id)
 	}
 
 	select {
@@ -133,6 +143,7 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 	case <-c.done:
 		return nil, c.termErr
 	case resp := <-respCh:
+		c.log(ctx, "response received", "id", id, "failed", resp.Failed())
 		return resp, nil
 	}
 }
@@ -156,6 +167,7 @@ func (c *conn) Notify(ctx context.Context, method string, params any) error {
 	case <-c.done:
 		return c.termErr
 	case c.outgoing <- req:
+		c.log(ctx, "notification sent", "method", method)
 		return nil
 	}
 }
@@ -438,6 +450,7 @@ func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch 
 
 	for _, req := range requests {
 		wg.Go(func() {
+			c.log(ctx, "request received", "method", req.Method(), "id", req.ID())
 			if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID(), sink), c); err != nil {
 				c.shutdown(fmt.Errorf("handler error: %w", err))
 			}
@@ -523,6 +536,8 @@ func (c *conn) replier(id any, sink chan<- any) Replier {
 		} else {
 			resp = newResponse(id, data)
 		}
+
+		c.log(ctx, "response sent", "id", id)
 
 		select {
 		case <-ctx.Done():
