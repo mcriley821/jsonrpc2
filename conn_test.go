@@ -1,8 +1,10 @@
 package jsonrpc2_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"math/rand"
 	"net"
 	"sync"
@@ -618,4 +620,345 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
 
 		assert.Error(t, conn.Err())
 	})
+}
+
+func TestConn_Batch_Errors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty batch returns error", func(t *testing.T) {
+		t.Parallel()
+
+		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+
+		resps, err := conn.Batch(t.Context())
+		require.Error(t, err)
+		assert.Nil(t, resps)
+	})
+
+	t.Run("bad params returns error", func(t *testing.T) {
+		t.Parallel()
+
+		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+
+		resps, err := conn.Batch(t.Context(), jsonrpc2.BatchCall("test", func() {}))
+		require.Error(t, err)
+		assert.Nil(t, resps)
+	})
+
+	t.Run("canceled context returns context.Canceled", func(t *testing.T) {
+		t.Parallel()
+
+		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		resps, err := conn.Batch(ctx, jsonrpc2.BatchCall("test", nil))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, resps)
+	})
+
+	t.Run("closed conn returns ErrClosed", func(t *testing.T) {
+		t.Parallel()
+
+		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+
+		require.NoError(t, conn.Close(t.Context()))
+
+		resps, err := conn.Batch(t.Context(), jsonrpc2.BatchCall("test", nil))
+		require.ErrorIs(t, err, jsonrpc2.ErrClosed)
+		assert.Nil(t, resps)
+	})
+}
+
+func TestConn_Batch_Notifications(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+
+	peerErrCh := make(chan error, 1)
+
+	go func() {
+		var raw json.RawMessage
+
+		if err := json.NewDecoder(p).Decode(&raw); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		var batch []map[string]any
+
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		for _, item := range batch {
+			_, hasID := item["id"]
+			if hasID {
+				peerErrCh <- errors.New("expected notification (no id) but found id field")
+
+				return
+			}
+		}
+	}()
+
+	resps, err := conn.Batch(t.Context(),
+		jsonrpc2.BatchNotification("method1", nil),
+		jsonrpc2.BatchNotification("method2", nil),
+	)
+	require.NoError(t, err)
+	assert.Nil(t, resps)
+
+	select {
+	case err := <-peerErrCh:
+		require.FailNow(t, err.Error())
+	default:
+	}
+}
+
+func TestConn_Batch_Mixed(t *testing.T) { //nolint:funlen
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+
+	peerErrCh := make(chan error, 1)
+
+	go func() {
+		var raw json.RawMessage
+
+		if err := json.NewDecoder(p).Decode(&raw); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		var batch []struct {
+			ID     any             `json:"id"`
+			Params json.RawMessage `json:"params"`
+		}
+
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		responses := make([]map[string]any, 0, len(batch))
+
+		for _, item := range batch {
+			resp := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      item.ID,
+				"result":  item.Params,
+			}
+			responses = append(responses, resp)
+		}
+
+		data, err := json.Marshal(responses)
+		if err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		if _, err := p.Write(data); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+	}()
+
+	resps, err := conn.Batch(t.Context(),
+		jsonrpc2.BatchCall("method1", "params1"),
+		jsonrpc2.BatchNotification("method2", nil),
+		jsonrpc2.BatchCall("method3", "params3"),
+	)
+	require.NoError(t, err)
+	require.Len(t, resps, 3)
+
+	select {
+	case err := <-peerErrCh:
+		require.FailNow(t, err.Error())
+
+	default:
+	}
+
+	for i, resp := range resps {
+		if i != 1 {
+			require.NotNil(t, resp, "response %d should not be nil", i)
+			assert.False(t, resp.Failed())
+		} else {
+			assert.Nil(t, resp)
+		}
+	}
+}
+
+func TestConn_Batch_WireFormat(t *testing.T) { //nolint:cyclop,funlen
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+
+	peerErrCh := make(chan error, 1)
+
+	go func() {
+		var raw json.RawMessage
+
+		if err := json.NewDecoder(p).Decode(&raw); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		trimmed := bytes.TrimLeft(raw, " \t\r\n")
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			peerErrCh <- errors.New("expected JSON array for batch")
+
+			return
+		}
+
+		var batch []struct {
+			ID any `json:"id"`
+		}
+
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		responses := make([]map[string]any, 0)
+
+		for _, item := range batch {
+			if item.ID != nil {
+				resp := map[string]any{
+					"jsonrpc": "2.0",
+					"id":      item.ID,
+					"result":  nil,
+				}
+				responses = append(responses, resp)
+			}
+		}
+
+		data, err := json.Marshal(responses)
+		if err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		if _, err := p.Write(data); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+	}()
+
+	resps, err := conn.Batch(t.Context(),
+		jsonrpc2.BatchCall("method1", nil),
+		jsonrpc2.BatchNotification("method2", nil),
+	)
+	require.NoError(t, err)
+	require.Len(t, resps, 2)
+	assert.Nil(t, resps[1])
+
+	select {
+	case err := <-peerErrCh:
+		require.FailNow(t, err.Error())
+	default:
+	}
+}
+
+func TestConn_Batch_Concurrent(t *testing.T) { //nolint:cyclop,funlen
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+
+	peerErrCh := make(chan error, 1)
+
+	go func() {
+		dec := json.NewDecoder(p)
+
+		for range 2 {
+			var raw json.RawMessage
+
+			if err := dec.Decode(&raw); err != nil {
+				peerErrCh <- err
+
+				return
+			}
+
+			var batch []struct {
+				ID any `json:"id"`
+			}
+
+			if err := json.Unmarshal(raw, &batch); err != nil {
+				peerErrCh <- err
+
+				return
+			}
+
+			responses := make([]map[string]any, 0, len(batch))
+
+			for _, item := range batch {
+				resp := map[string]any{
+					"jsonrpc": "2.0",
+					"id":      item.ID,
+					"result":  "ok",
+				}
+				responses = append(responses, resp)
+			}
+
+			data, err := json.Marshal(responses)
+			if err != nil {
+				peerErrCh <- err
+
+				return
+			}
+
+			if _, err := p.Write(data); err != nil {
+				peerErrCh <- err
+
+				return
+			}
+		}
+	}()
+
+	resultCh := make(chan error, 2)
+
+	for range 2 {
+		go func() {
+			resps, err := conn.Batch(t.Context(),
+				jsonrpc2.BatchCall("method1", nil),
+				jsonrpc2.BatchCall("method2", nil),
+			)
+			if err != nil {
+				resultCh <- err
+
+				return
+			}
+
+			if len(resps) != 2 {
+				resultCh <- errors.New("expected 2 responses")
+
+				return
+			}
+
+			resultCh <- nil
+		}()
+	}
+
+	for range 2 {
+		if err := <-resultCh; err != nil {
+			require.FailNow(t, err.Error())
+		}
+	}
+
+	select {
+	case err := <-peerErrCh:
+		require.FailNow(t, err.Error())
+	default:
+	}
 }

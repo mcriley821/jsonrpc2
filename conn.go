@@ -25,6 +25,12 @@ type Conn interface {
 	// Returns an error if the connection is closed, ctx expires, or if marshaling the request fails.
 	Notify(ctx context.Context, method string, params any) error
 
+	// Batch sends multiple request items as a single batch. It returns one Response
+	// per non-notification item, in input order. Returns nil if every item is a
+	// notification. Returns an error if the batch is empty, ctx expires, the
+	// connection is closed, or any item fails to marshal.
+	Batch(ctx context.Context, items ...BatchItem) ([]Response, error)
+
 	// Close gracefully shuts down the connection and waits for shutdown to complete.
 	// Safe to call multiple times. Returns an error if ctx expires before shutdown finishes.
 	Close(ctx context.Context) error
@@ -36,6 +42,32 @@ type Conn interface {
 	// Err returns the terminal error, or nil if the connection is still running.
 	// Check [Conn.Done] first; Err is only valid after [Conn.Done] closes.
 	Err() error
+}
+
+// BatchItem is a single entry in an outbound batch.
+// Construct with [BatchCall] or [BatchNotification].
+type BatchItem struct {
+	method  string
+	params  any
+	isNotif bool
+}
+
+// BatchCall creates a batch item for a request that expects a response.
+func BatchCall(method string, params any) BatchItem {
+	return BatchItem{
+		method:  method,
+		params:  params,
+		isNotif: false,
+	}
+}
+
+// BatchNotification creates a batch item for a notification.
+func BatchNotification(method string, params any) BatchItem {
+	return BatchItem{
+		method:  method,
+		params:  params,
+		isNotif: true,
+	}
 }
 
 // conn is an implementation of [Conn].
@@ -109,9 +141,9 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	respCh := make(chan *response, 1)
+	respMap := map[string]chan *response{id: make(chan *response, 1)}
 
-	if err := c.registerRequests(map[string]chan *response{id: respCh}); err != nil {
+	if err := c.registerRequests(respMap); err != nil {
 		return nil, err
 	}
 
@@ -130,16 +162,48 @@ func (c *conn) Call(ctx context.Context, method string, params any) (Response, e
 		c.log(ctx, "request sent", "method", method, "id", id)
 	}
 
+	_, resp, err := c.receiveResponse(ctx, respMap)
+
+	return resp, err
+}
+
+// Batch sends multiple request items as a single batch and waits for a response, if applicable.
+func (c *conn) Batch(ctx context.Context, items ...BatchItem) ([]Response, error) {
+	if len(items) == 0 {
+		return nil, errors.New("batch is empty")
+	}
+
+	reqs, respChans, idxMap, err := c.buildBatch(items)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() {
+		c.mu.Lock()
+
+		for id := range respChans {
+			delete(c.inflight, id)
+		}
+
+		c.mu.Unlock()
+	}()
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err() //nolint:wrapcheck
 	case <-c.done:
 		return nil, c.termErr
-	case resp := <-respCh:
-		c.log(ctx, "response received", "id", id, "failed", resp.Failed())
-
-		return resp, nil
+	case c.outgoing <- reqs:
+		c.log(ctx, "batch sent", "items", len(reqs))
 	}
+
+	if len(respChans) == 0 {
+		return nil, nil
+	}
+
+	responses := make([]Response, len(items))
+
+	return responses, c.collectBatchResponses(ctx, responses, idxMap, respChans)
 }
 
 // Notify sends a notification. Pass nil for params to omit the field.
@@ -202,6 +266,75 @@ func (c *conn) log(ctx context.Context, msg string, args ...any) {
 	if c.logger != nil {
 		c.logger.DebugContext(ctx, msg, args...)
 	}
+}
+
+// buildBatch creates the requests, response channels, and index mappings required to properly route responses back to
+// their corresponding requests in a Batch call.
+func (c *conn) buildBatch(items []BatchItem) ([]*request, map[string]chan *response, map[string]int, error) {
+	reqs := make([]*request, len(items))
+	respChans := make(map[string]chan *response)
+	idxMap := make(map[string]int)
+
+	for i, item := range items {
+		var id any
+
+		if !item.isNotif {
+			uid := uuid.NewString()
+			id = uid
+			respCh := make(chan *response, 1)
+			respChans[uid] = respCh
+			idxMap[uid] = i
+		}
+
+		req, err := newRequest(id, item.method, item.params)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("creating request: %w", err)
+		}
+
+		reqs[i] = req
+	}
+
+	return reqs, respChans, idxMap, c.registerRequests(respChans)
+}
+
+// collectBatchResponses fills in the responses array with the corresponding response by index.
+func (c *conn) collectBatchResponses(
+	ctx context.Context,
+	responses []Response,
+	idxMap map[string]int,
+	respChans map[string]chan *response,
+) error {
+	for len(respChans) > 0 {
+		id, resp, err := c.receiveResponse(ctx, respChans)
+		if err != nil {
+			return err
+		}
+
+		responses[idxMap[id]] = resp
+	}
+
+	return nil
+}
+
+// receiveResponse returns a single response and its corresponding request id from the given response channels.
+// note: this function will remove the entry from the map on success.
+func (c *conn) receiveResponse(ctx context.Context, respChans map[string]chan *response) (string, *response, error) {
+	for id, ch := range respChans {
+		select {
+		case <-ctx.Done():
+			return "", nil, ctx.Err() //nolint:wrapcheck
+		case <-c.done:
+			return "", nil, c.termErr
+		case resp := <-ch:
+			c.log(ctx, "response received", "id", id)
+
+			delete(respChans, id)
+
+			return id, resp, nil
+		}
+	}
+
+	return "", nil, errors.New("no response channels available")
 }
 
 // registerRequests registers requests in the inflight map. It holds mu for
