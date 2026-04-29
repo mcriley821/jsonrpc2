@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/mcriley821/jsonrpc2/compare/v1.0.0...v1.0.1) (2026-04-29)
+
+
+### Bug Fixes
+
+* eagerly send responses even in blocking handlers ([#43](https://github.com/mcriley821/jsonrpc2/issues/43)) ([60d568a](https://github.com/mcriley821/jsonrpc2/commit/60d568ac8b5d43f0507fdefea66682c3561338e6))
+
 ## 1.0.0 (2026-04-29)
 
 
