@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"sync"
@@ -556,6 +557,47 @@ func TestNewConn_DefaultHandler_NotificationIgnored(t *testing.T) {
 	assert.Error(t, err, "expected no response for notification with no handler")
 }
 
+func TestNewConn_CallsWithinHandler(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan struct{}, 1)
+
+	_, p := getTestConn(t, jsonrpc2.HandlerFunc(func(
+		ctx context.Context,
+		req jsonrpc2.Request,
+		_ jsonrpc2.Replier,
+		conn jsonrpc2.Conn,
+	) error {
+		assert.Equal(t, "test", req.Method())
+
+		resp, err := conn.Call(ctx, "reply", nil)
+
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.False(t, resp.Failed())
+
+		done <- struct{}{}
+
+		return nil
+	}))
+
+	_, err := p.Write([]byte(`{"jsonrpc":"2.0","id":"test-id","method":"test"}`))
+	require.NoError(t, err)
+
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(p).Decode(&resp))
+	require.Contains(t, resp, "id")
+
+	_, err = p.Write(fmt.Appendf(nil, `{"jsonrpc":"2.0","id":"%s","result":null}`, resp["id"]))
+	require.NoError(t, err)
+
+	select {
+	case <-t.Context().Done():
+		require.FailNow(t, "timeout waiting for handler to finish")
+	case <-done:
+	}
+}
+
 func TestConn_Replier_DoubleReply(t *testing.T) {
 	t.Parallel()
 
@@ -677,6 +719,119 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:funlen
 
 		assert.Error(t, conn.Err())
 	})
+}
+
+// TestConn_ResponseSentBeforeHandlerReturns verifies that a response is sent
+// to the peer as soon as the handler calls the [Replier], even if the handler
+// itself continues to block afterwards.
+func TestConn_ResponseSentBeforeHandlerReturns(t *testing.T) {
+	t.Parallel()
+
+	handlerReplied := make(chan struct{})
+	unblockHandler := make(chan struct{})
+
+	handler := jsonrpc2.HandlerFunc(func(
+		ctx context.Context,
+		_ jsonrpc2.Request,
+		reply jsonrpc2.Replier,
+		_ jsonrpc2.Conn,
+	) error {
+		if err := reply(ctx, "done"); err != nil {
+			return err
+		}
+
+		close(handlerReplied)
+
+		select {
+		case <-unblockHandler:
+		case <-ctx.Done():
+		}
+
+		return nil
+	})
+
+	_, p := getTestConn(t, handler)
+
+	_, err := p.Write([]byte(`{"jsonrpc":"2.0","id":"test-1","method":"test"}`))
+	require.NoError(t, err)
+
+	respCh := make(chan json.RawMessage, 1)
+	peerErrCh := make(chan error, 1)
+
+	go func() {
+		var resp json.RawMessage
+		if err := json.NewDecoder(p).Decode(&resp); err != nil {
+			peerErrCh <- err
+
+			return
+		}
+
+		respCh <- resp
+	}()
+
+	select {
+	case <-t.Context().Done():
+		require.FailNow(t, "handler did not call reply")
+	case <-handlerReplied:
+	}
+
+	// The response must arrive at the peer while the handler is still blocked.
+	select {
+	case <-t.Context().Done():
+		require.FailNow(t, "response not received while handler was blocked after replying")
+	case err := <-peerErrCh:
+		require.NoError(t, err)
+	case resp := <-respCh:
+		assert.NotEmpty(t, resp)
+	}
+
+	close(unblockHandler)
+}
+
+func TestNewConn_BatchResponseDeferredUntilAllHandlersDone(t *testing.T) {
+	t.Parallel()
+
+	_, p := getTestConn(t, jsonrpc2.HandlerFunc(func(
+		ctx context.Context,
+		req jsonrpc2.Request,
+		reply jsonrpc2.Replier,
+		conn jsonrpc2.Conn,
+	) error {
+		switch req.Method() {
+		case "blocking":
+			resp, err := conn.Call(ctx, "inner", nil)
+			require.NoError(t, err)
+			require.False(t, resp.Failed())
+
+			return reply(ctx, "blocking-done")
+		case "immediate":
+			return reply(ctx, "immediate-done")
+		}
+
+		return nil
+	}))
+
+	batch := `[{"jsonrpc":"2.0","id":"b1","method":"blocking"},{"jsonrpc":"2.0","id":"b2","method":"immediate"}]`
+	_, err := p.Write([]byte(batch))
+	require.NoError(t, err)
+
+	// The "inner" call from the blocking handler arrives first because the
+	// batch response is held until both handlers have replied.
+	// Reading the batch response before responding here would deadlock.
+	var innerCall map[string]any
+	require.NoError(t, json.NewDecoder(p).Decode(&innerCall))
+	require.Equal(t, "inner", innerCall["method"])
+
+	innerID, ok := innerCall["id"].(string)
+	require.True(t, ok)
+
+	_, err = p.Write(fmt.Appendf(nil, `{"jsonrpc":"2.0","id":"%s","result":null}`, innerID))
+	require.NoError(t, err)
+
+	// Now both handlers can finish, and the batch response arrives.
+	var batchResp []map[string]any
+	require.NoError(t, json.NewDecoder(p).Decode(&batchResp))
+	require.Len(t, batchResp, 2)
 }
 
 func TestConn_Batch_Errors(t *testing.T) {

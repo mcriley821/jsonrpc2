@@ -574,17 +574,26 @@ func (c *conn) write(ctx context.Context, errChan chan<- error) {
 	}
 }
 
-// handleRequests invokes the handler for the incoming requests.
-// If the handler returns an error, the connection is closed.
+// handleRequests invokes the handler for each incoming request. Each handler runs
+// in its own goroutine tracked by c.wg so it may outlive handleRequests itself.
+// Responses are collected and sent as soon as every handler has replied, without
+// waiting for handlers to return. If a handler returns an error, the connection is closed.
 func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch bool) {
 	defer c.wg.Done()
 
-	sink := make(chan any, len(requests))
-
-	var wg sync.WaitGroup
+	// Count how many requests will produce a response (non-notifications have a non-nil id).
+	expectedResponses := 0
 
 	for _, req := range requests {
-		wg.Go(func() {
+		if req.ID() != nil {
+			expectedResponses++
+		}
+	}
+
+	sink := make(chan any, expectedResponses)
+
+	for _, req := range requests {
+		c.wg.Go(func() {
 			c.log(ctx, "request received", "method", req.Method(), "id", req.ID())
 
 			if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID(), sink), c); err != nil {
@@ -593,14 +602,7 @@ func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch 
 		})
 	}
 
-	wg.Wait()
-	close(sink)
-
-	out := make([]any, 0, len(requests))
-	for resp := range sink {
-		out = append(out, resp)
-	}
-
+	out := c.collectReplies(ctx, expectedResponses, sink)
 	if len(out) == 0 {
 		return
 	}
@@ -613,9 +615,28 @@ func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch 
 	}
 
 	select {
-	case <-c.Done():
+	case <-ctx.Done():
 	case c.outgoing <- msg:
 	}
+}
+
+// collectReplies waits for count reply values to arrive on sink, returning them
+// in arrival order. Returns nil immediately if ctx is cancelled. Selecting on
+// ctx.Done() (not c.done) allows a handler that calls shutdown — which cancels
+// ctx — to unblock this function before c.done is closed.
+func (c *conn) collectReplies(ctx context.Context, count int, sink <-chan any) []any {
+	out := make([]any, 0, count)
+
+	for range count {
+		select {
+		case <-ctx.Done():
+			return nil
+		case resp := <-sink:
+			out = append(out, resp)
+		}
+	}
+
+	return out
 }
 
 // handleResponses routes an incoming responses to the waiting [Conn.Call]
