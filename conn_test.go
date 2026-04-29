@@ -16,6 +16,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// blockingWriteConn wraps a net.Conn and blocks the first Write call until
+// released, allowing tests to stall the write goroutine on demand.
+type blockingWriteConn struct {
+	net.Conn
+
+	writeCalled chan struct{}
+	release     chan struct{}
+}
+
+func newBlockingWriteConn(t *testing.T) *blockingWriteConn {
+	t.Helper()
+
+	c1, c2 := net.Pipe()
+
+	t.Cleanup(func() { _ = c1.Close() })
+	t.Cleanup(func() { _ = c2.Close() })
+
+	return &blockingWriteConn{
+		Conn:        c1,
+		writeCalled: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (b *blockingWriteConn) Write(p []byte) (int, error) {
+	select {
+	case b.writeCalled <- struct{}{}:
+	default:
+	}
+
+	<-b.release
+
+	return b.Conn.Write(p) //nolint:wrapcheck
+}
+
 func assertNotCalledHandler(t *testing.T) jsonrpc2.Handler {
 	t.Helper()
 
@@ -65,7 +100,7 @@ func TestNewConn(t *testing.T) {
 	_, _ = getTestConn(t, assertNotCalledHandler(t))
 }
 
-func TestConn_Call(t *testing.T) {
+func TestConn_Call_Errors(t *testing.T) {
 	t.Parallel()
 
 	t.Run("bad params", func(t *testing.T) {
@@ -81,7 +116,14 @@ func TestConn_Call(t *testing.T) {
 	t.Run("canceled context", func(t *testing.T) {
 		t.Parallel()
 
-		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+		rwc := newBlockingWriteConn(t)
+		stream := jsonrpc2.NewStream(rwc)
+		conn := jsonrpc2.NewConn(t.Context(), stream, jsonrpc2.WithHandler(assertNotCalledHandler(t)))
+		t.Cleanup(func() { _ = conn.Close(t.Context()) })
+
+		go func() { _ = conn.Notify(t.Context(), "", nil) }()
+
+		<-rwc.writeCalled
 
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -89,6 +131,8 @@ func TestConn_Call(t *testing.T) {
 		resp, err := conn.Call(ctx, "", nil)
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Nil(t, resp)
+
+		close(rwc.release)
 	})
 
 	t.Run("closed conn", func(t *testing.T) {
@@ -102,85 +146,90 @@ func TestConn_Call(t *testing.T) {
 		assert.Nil(t, resp)
 		require.ErrorIs(t, err, jsonrpc2.ErrClosed)
 	})
-
-	t.Run("ok", func(t *testing.T) {
-		t.Parallel()
-
-		conn, p := getTestConn(t, assertNotCalledHandler(t))
-
-		idCh := make(chan any, 1)
-		errCh := make(chan error, 1)
-
-		go pipeRespond(t, p, idCh, errCh, nil)
-
-		resp, err := conn.Call(t.Context(), "", nil)
-		require.NoError(t, err)
-		require.NotNil(t, resp)
-
-		select {
-		case err := <-errCh:
-			require.FailNow(t, err.Error())
-		case id := <-idCh:
-			assert.Equal(t, id, resp.ID())
-		}
-	})
 }
 
-func TestConn_Notify(t *testing.T) {
+func TestConn_Call(t *testing.T) {
 	t.Parallel()
 
-	t.Run("bad params", func(t *testing.T) {
-		t.Parallel()
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
 
-		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+	idCh := make(chan any, 1)
+	errCh := make(chan error, 1)
 
-		err := conn.Notify(t.Context(), "", func() {})
-		assert.Error(t, err)
-	})
+	go pipeRespond(t, p, idCh, errCh, nil)
 
-	t.Run("canceled context", func(t *testing.T) {
-		t.Parallel()
+	resp, err := conn.Call(t.Context(), "", nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
 
-		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+	select {
+	case err := <-errCh:
+		require.FailNow(t, err.Error())
+	case id := <-idCh:
+		assert.Equal(t, id, resp.ID())
+	}
+}
 
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
+func TestConn_Notify_BadParams(t *testing.T) {
+	t.Parallel()
 
-		err := conn.Notify(ctx, "", nil)
-		require.ErrorIs(t, err, context.Canceled)
-	})
+	conn, _ := getTestConn(t, assertNotCalledHandler(t))
 
-	t.Run("closed conn", func(t *testing.T) {
-		t.Parallel()
+	err := conn.Notify(t.Context(), "", func() {})
+	assert.Error(t, err)
+}
 
-		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+func TestConn_Notify_CanceledContext(t *testing.T) {
+	t.Parallel()
 
-		require.NoError(t, conn.Close(t.Context()))
+	rwc := newBlockingWriteConn(t)
+	stream := jsonrpc2.NewStream(rwc)
+	conn := jsonrpc2.NewConn(t.Context(), stream, jsonrpc2.WithHandler(assertNotCalledHandler(t)))
+	t.Cleanup(func() { _ = conn.Close(t.Context()) })
 
-		err := conn.Notify(t.Context(), "", nil)
-		require.ErrorIs(t, err, jsonrpc2.ErrClosed)
-	})
+	go func() { _ = conn.Notify(t.Context(), "", nil) }()
 
-	t.Run("ok", func(t *testing.T) {
-		t.Parallel()
+	<-rwc.writeCalled
 
-		conn, p := getTestConn(t, assertNotCalledHandler(t))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
 
-		ch := make(chan []byte, 1)
-		errCh := make(chan error, 1)
+	err := conn.Notify(ctx, "", nil)
+	require.ErrorIs(t, err, context.Canceled)
 
-		go pipeNotif(t, p, ch, errCh)
+	close(rwc.release)
+}
 
-		err := conn.Notify(t.Context(), "", nil)
-		require.NoError(t, err)
+func TestConn_Notify_Closed(t *testing.T) {
+	t.Parallel()
 
-		select {
-		case err := <-errCh:
-			require.FailNow(t, err.Error())
-		case data := <-ch:
-			assert.NotEmpty(t, data)
-		}
-	})
+	conn, _ := getTestConn(t, assertNotCalledHandler(t))
+
+	require.NoError(t, conn.Close(t.Context()))
+
+	err := conn.Notify(t.Context(), "", nil)
+	require.ErrorIs(t, err, jsonrpc2.ErrClosed)
+}
+
+func TestConn(t *testing.T) {
+	t.Parallel()
+
+	conn, p := getTestConn(t, assertNotCalledHandler(t))
+
+	ch := make(chan []byte, 1)
+	errCh := make(chan error, 1)
+
+	go pipeNotif(t, p, ch, errCh)
+
+	err := conn.Notify(t.Context(), "", nil)
+	require.NoError(t, err)
+
+	select {
+	case err := <-errCh:
+		require.FailNow(t, err.Error())
+	case data := <-ch:
+		assert.NotEmpty(t, data)
+	}
 }
 
 func TestConn_Close(t *testing.T) {
@@ -546,7 +595,7 @@ func TestConn_Replier_DoubleReply(t *testing.T) {
 	}
 }
 
-func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
+func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:funlen
 	t.Parallel()
 
 	handler := func(ctx context.Context, req jsonrpc2.Request, reply jsonrpc2.Replier, _ jsonrpc2.Conn) error {
@@ -554,6 +603,8 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
 	}
 
 	t.Run("empty batch produces no response", func(t *testing.T) {
+		t.Parallel()
+
 		_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
 
 		_, err := p.Write([]byte(`[]`))
@@ -569,6 +620,8 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
 	})
 
 	t.Run("notifications-only batch produces no response", func(t *testing.T) {
+		t.Parallel()
+
 		_, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
 
 		_, err := p.Write([]byte(`[
@@ -586,6 +639,8 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
 	})
 
 	t.Run("request in response batch closes connection", func(t *testing.T) {
+		t.Parallel()
+
 		conn, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
 
 		_, err := p.Write([]byte(`[
@@ -604,6 +659,8 @@ func TestConn_BatchRequest_Handling(t *testing.T) { //nolint:tparallel,funlen
 	})
 
 	t.Run("response in request batch closes connection", func(t *testing.T) {
+		t.Parallel()
+
 		conn, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
 
 		_, err := p.Write([]byte(`[
@@ -645,10 +702,17 @@ func TestConn_Batch_Errors(t *testing.T) {
 		assert.Nil(t, resps)
 	})
 
-	t.Run("canceled context returns context.Canceled", func(t *testing.T) {
+	t.Run("canceled context", func(t *testing.T) {
 		t.Parallel()
 
-		conn, _ := getTestConn(t, assertNotCalledHandler(t))
+		rwc := newBlockingWriteConn(t)
+		stream := jsonrpc2.NewStream(rwc)
+		conn := jsonrpc2.NewConn(t.Context(), stream, jsonrpc2.WithHandler(assertNotCalledHandler(t)))
+		t.Cleanup(func() { _ = conn.Close(t.Context()) })
+
+		go func() { _ = conn.Notify(t.Context(), "", nil) }()
+
+		<-rwc.writeCalled
 
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -656,6 +720,8 @@ func TestConn_Batch_Errors(t *testing.T) {
 		resps, err := conn.Batch(ctx, jsonrpc2.BatchCall("test", nil))
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Nil(t, resps)
+
+		close(rwc.release)
 	})
 
 	t.Run("closed conn returns ErrClosed", func(t *testing.T) {
