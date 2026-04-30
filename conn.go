@@ -594,9 +594,25 @@ func (c *conn) handleRequests(ctx context.Context, requests []*request, isBatch 
 
 	for _, req := range requests {
 		c.wg.Go(func() {
+			reply := c.replier(req.ID(), sink)
+
+			// Recover handler panics so a single misbehaving handler can't tear
+			// down the whole connection. For requests we report InternalError;
+			// notifications are silently dropped (no response is expected and
+			// the replier is a no-op anyway).
+			defer func() {
+				if r := recover(); r != nil {
+					c.log(ctx, "handler panic recovered",
+						"method", req.Method(), "id", req.ID(), "panic", r)
+					if req.ID() != nil {
+						_ = reply(ctx, NewError(InternalError, "internal server error", nil))
+					}
+				}
+			}()
+
 			c.log(ctx, "request received", "method", req.Method(), "id", req.ID())
 
-			if err := c.handler.ServeRPC(ctx, req, c.replier(req.ID(), sink), c); err != nil {
+			if err := c.handler.ServeRPC(ctx, req, reply, c); err != nil {
 				c.shutdown(fmt.Errorf("handler error: %w", err))
 			}
 		})

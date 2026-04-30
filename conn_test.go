@@ -598,6 +598,57 @@ func TestNewConn_CallsWithinHandler(t *testing.T) {
 	}
 }
 
+func TestConn_HandlerPanic_RequestRepliesInternalError(t *testing.T) {
+	t.Parallel()
+
+	handler := func(_ context.Context, _ jsonrpc2.Request, _ jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+		panic("boom")
+	}
+
+	conn, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
+
+	_, err := p.Write([]byte(`{"jsonrpc":"2.0","id":"panic-1","method":"test","params":null}`))
+	require.NoError(t, err)
+
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(p).Decode(&resp))
+
+	assert.Equal(t, "panic-1", resp["id"])
+	require.Contains(t, resp, "error")
+
+	errObj, ok := resp["error"].(map[string]any)
+	require.True(t, ok, "expected error object")
+	assert.Equal(t, float64(jsonrpc2.InternalError), errObj["code"])
+
+	// Connection should still be alive after the panic.
+	select {
+	case <-conn.Done():
+		require.FailNow(t, "connection should remain open after handler panic")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestConn_HandlerPanic_NotificationDropped(t *testing.T) {
+	t.Parallel()
+
+	handler := func(_ context.Context, _ jsonrpc2.Request, _ jsonrpc2.Replier, _ jsonrpc2.Conn) error {
+		panic("boom")
+	}
+
+	conn, p := getTestConn(t, jsonrpc2.HandlerFunc(handler))
+
+	_, err := p.Write([]byte(`{"jsonrpc":"2.0","method":"test","params":null}`))
+	require.NoError(t, err)
+
+	// No response is expected for a notification; ensure the connection
+	// stays open and a follow-up request still gets processed.
+	select {
+	case <-conn.Done():
+		require.FailNow(t, "connection should remain open after notification panic")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestConn_Replier_DoubleReply(t *testing.T) {
 	t.Parallel()
 
